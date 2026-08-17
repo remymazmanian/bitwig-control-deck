@@ -1,0 +1,18 @@
+node_modules/
+logs/
+*.log
+.DS_Store
+
+# Per-install secrets and generated data — never commit these.
+data/bridge-token
+data/install-path
+data/plugin-index.json
+
+# Build output
+bin/
+build/
+
+dashboard/node_modules/
+dashboard/.next/
+dashboard/next-env.d.ts
+dashboard/tsconfig.tsbuildinfo

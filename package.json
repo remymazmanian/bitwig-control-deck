@@ -1,0 +1,26 @@
+{
+  "name": "bitwig-control-deck",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bitwig Control Deck: an MCP bridge for exact, read-back-verified Bitwig Studio control, with a local status dashboard",
+  "author": "Remy Mazmanian",
+  "license": "MIT",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "setup": "node scripts/setup.mjs",
+    "dashboard:api": "node src/dashboard-server.mjs",
+    "index:plugins": "node src/plugin-index.mjs",
+    "build:midi-ports": "clang -O2 -framework CoreFoundation -framework CoreMIDI native/control_deck_midi_ports.c -o bin/control-deck-midi-ports",
+    "build:macos": "zsh macos/build-app.sh",
+    "check": "node --check src/index.mjs && node --check src/bitwig-client.mjs && node --check src/plugin-index.mjs && node --check src/dashboard-server.mjs && node --check scripts/setup.mjs && node --check controller/ControlDeck.control.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "zod": "^3.25.76"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
