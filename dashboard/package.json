@@ -1,0 +1,32 @@
+{
+  "name": "control-deck-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "next dev --port 50703 --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --port 50703 --hostname 127.0.0.1",
+    "lint": "eslint . --ignore-pattern .next",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "check": "npm run build && node --test tests/rendered-html.test.mjs"
+  },
+  "dependencies": {
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3"
+  }
+}
