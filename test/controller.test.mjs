@@ -128,3 +128,40 @@ test("set_tempo fails when Bitwig keeps the old tempo", () => {
   assert.equal(responses[0].ok, false);
   assert.match(responses[0].payload.message, /tempo is 120 BPM, requested 128 BPM/);
 });
+
+function fakeTrack(applies) {
+  const state = { volume: 0.5, pan: 0.5, mute: false, solo: false, arm: false };
+  const param = key => ({
+    get: () => state[key],
+    set: v => { if (applies) state[key] = v; },
+    setImmediately: v => { if (applies) state[key] = v; },
+    displayedValue: () => ({ get: () => String(state[key]) })
+  });
+  return {
+    volume: () => param("volume"), pan: () => param("pan"),
+    mute: () => param("mute"), solo: () => param("solo"), arm: () => param("arm"),
+    name: () => ({ get: () => "Inst 1" }), position: () => ({ get: () => 0 }),
+    trackType: () => ({ get: () => "Instrument" })
+  };
+}
+
+test("set_track_mix succeeds only after Bitwig reads every requested value back", () => {
+  const { context, responses, advance, originalDispatch } = loadController();
+  context.dispatch = originalDispatch;
+  const track = fakeTrack(true);
+  context.requireTrack = () => track;
+  context.enqueue(5000, "1", "set_track_mix", { trackIndex: 0, trackName: "Inst 1", volumeNormalized: 0.7, mute: true }, 5000);
+  advance(200);
+  assert.equal(responses[0].ok, true);
+  assert.equal(responses[0].payload.track.mute, true);
+});
+
+test("set_track_mix fails with the values Bitwig actually holds", () => {
+  const { context, responses, advance, originalDispatch } = loadController();
+  context.dispatch = originalDispatch;
+  context.requireTrack = () => fakeTrack(false);
+  context.enqueue(5000, "1", "set_track_mix", { trackIndex: 0, trackName: "Inst 1", volumeNormalized: 0.7, mute: true }, 5000);
+  advance(1200);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /volume is 0.5, requested 0.7; mute is false, requested true/);
+});

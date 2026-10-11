@@ -1314,11 +1314,17 @@ function handleSetTrackMix(request) {
       if (params.panNormalized !== undefined && differs(track.pan().get(), params.panNormalized, 0.002)) {
          problems.push("pan is " + track.pan().get() + ", requested " + params.panNormalized);
       }
-      var switches = ["mute", "solo", "arm"];
+      // Bitwig's script host only supports direct method calls on these values
+      // (track.mute()), not computed ones (track["mute"]()).
+      var switches = [
+         { name: "mute", actual: track.mute().get() },
+         { name: "solo", actual: track.solo().get() },
+         { name: "arm", actual: track.arm().get() }
+      ];
       for (var i = 0; i < switches.length; i++) {
-         var name = switches[i];
-         if (params[name] !== undefined && track[name]().get() !== Boolean(params[name])) {
-            problems.push(name + " is " + track[name]().get() + ", requested " + Boolean(params[name]));
+         var requested = params[switches[i].name];
+         if (requested !== undefined && switches[i].actual !== Boolean(requested)) {
+            problems.push(switches[i].name + " is " + switches[i].actual + ", requested " + Boolean(requested));
          }
       }
       return problems.join("; ");
