@@ -6,6 +6,11 @@ export const BRIDGE_HOST = process.env.CONTROL_DECK_HOST || "127.0.0.1";
 export const BRIDGE_PORT = Number(process.env.CONTROL_DECK_PORT || 50701);
 export const BRIDGE_PROTOCOL = "control-deck/1";
 export const TOKEN_FILE = new URL("../data/bridge-token", import.meta.url);
+// macOS caps a UDP datagram at the socket's send buffer, which defaults to
+// 9216 bytes (net.inet.udp.maxdgram). Raising it lets large note clips through.
+export const SEND_BUFFER_BYTES = 65536;
+// Largest request packet the client will try to send to Bitwig.
+export const MAX_PACKET_BYTES = 60000;
 
 // The per-install secret shared with the Bitwig controller script. Created by
 // `npm run setup`; never committed.
@@ -35,7 +40,7 @@ export class BitwigClient {
       this.rejectReady = reject;
     });
 
-    this.udp = dgram.createSocket("udp4");
+    this.udp = dgram.createSocket({ type: "udp4", sendBufferSize: SEND_BUFFER_BYTES });
     this.udp.on("listening", () => this.resolveReady());
     this.udp.on("error", error => {
       if (this.rejectReady) this.rejectReady(error);
@@ -83,10 +88,27 @@ export class BitwigClient {
       id,
       method,
       params,
-      replyPort: this.udp.address().port
+      replyPort: this.udp.address().port,
+      // Lets the bridge drop requests the client has already given up on and
+      // recover if a request stalls inside Bitwig.
+      timeoutMs
     }), "utf8");
-    this.udp.send(packet, this.port, this.host);
+    if (packet.length > MAX_PACKET_BYTES) {
+      this.failPending(id, new Error(`The ${method} request is ${packet.length} bytes, over the ${MAX_PACKET_BYTES}-byte limit for one message to Bitwig. Split it into smaller requests.`));
+      return response;
+    }
+    this.udp.send(packet, this.port, this.host, error => {
+      if (error) this.failPending(id, new Error(`Could not send ${method} to Bitwig (${packet.length} bytes): ${error.message}`));
+    });
     return response;
+  }
+
+  failPending(id, error) {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pending.delete(id);
+    pending.reject(error);
   }
 
   close() {

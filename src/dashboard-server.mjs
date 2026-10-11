@@ -2,6 +2,7 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { BitwigClient } from "./bitwig-client.mjs";
+import { corsHeaders, isLocalHost } from "./local-http.mjs";
 import { buildPluginIndex, readPluginIndex, searchPluginIndex } from "./plugin-index.mjs";
 
 const HOST = "127.0.0.1";
@@ -18,16 +19,6 @@ try {
 }
 
 let activeIndexBuild = null;
-
-function corsHeaders(origin) {
-  const allowed = !origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
-  return {
-    "access-control-allow-origin": allowed && origin ? origin : "http://127.0.0.1:3000",
-    "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "content-type",
-    vary: "Origin"
-  };
-}
 
 function sendJson(response, status, payload, origin) {
   response.writeHead(status, {
@@ -74,7 +65,7 @@ async function bridgeSnapshot() {
 async function snapshot() {
   const [bridge, index] = await Promise.all([bridgeSnapshot(), readPluginIndex()]);
   return {
-    service: { state: "online", name: "Control Deck Local Service", version: "1.0.0", localOnly: true, installPath: INSTALL_PATH },
+    service: { state: "online", name: "Control Deck Local Service", version: "1.0.1", localOnly: true, installPath: INSTALL_PATH },
     bridge,
     library: {
       generatedAt: index.generatedAt,
@@ -87,6 +78,10 @@ async function snapshot() {
 
 const server = http.createServer(async (request, response) => {
   const origin = request.headers.origin;
+  if (!isLocalHost(request.headers.host)) {
+    sendJson(response, 403, { ok: false, message: "Control Deck only answers requests addressed to localhost or 127.0.0.1." });
+    return;
+  }
   if (request.method === "OPTIONS") {
     response.writeHead(204, corsHeaders(origin));
     response.end();

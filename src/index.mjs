@@ -7,7 +7,7 @@ import { BitwigClient } from "./bitwig-client.mjs";
 import { buildPluginIndex, readPluginIndex, searchPluginIndex } from "./plugin-index.mjs";
 
 const client = new BitwigClient();
-const server = new McpServer({ name: "Bitwig Control Deck", version: "1.0.0" });
+const server = new McpServer({ name: "Bitwig Control Deck", version: "1.0.1" });
 const logDirectory = new URL("../logs/", import.meta.url);
 const logFile = new URL("control-deck.jsonl", logDirectory);
 
@@ -214,7 +214,7 @@ server.registerTool("bitwig_create_note_clip", {
       velocity: z.number().int().min(1).max(127).default(100),
       duration: z.number().positive(),
       channel: z.number().int().min(0).max(15).default(0)
-    })).max(4096)
+    })).max(750).describe("Up to 750 notes per clip; one request to Bitwig must fit in a single 60 KB message")
   }
 }, async args => call("create_note_clip", args, 30000));
 
@@ -228,7 +228,7 @@ server.registerTool("bitwig_arrange_launcher_clips", {
       lengthBeats: z.number().int().min(1).max(512),
       clipName: z.string().min(1).max(120)
     })).min(1).max(64),
-    restoreTempo: z.number().min(20).max(666).default(122)
+    restoreTempo: z.number().min(20).max(666).optional().describe("Tempo to set after recording; defaults to the project's tempo before recording")
   }
 }, async args => call("arrange_launcher_clips", args, 120000));
 

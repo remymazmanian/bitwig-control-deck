@@ -1,13 +1,13 @@
 loadAPI(18);
 
-host.defineController("Control Deck", "Control Deck Bridge", "1.0.0", "BC47EFA3-FFD7-4155-9AE6-164DB3E58E89");
+host.defineController("Control Deck", "Control Deck Bridge", "1.0.1", "BC47EFA3-FFD7-4155-9AE6-164DB3E58E89");
 host.defineMidiPorts(1, 1);
 // Control Deck's native macOS helper publishes these private virtual endpoints. They
 // give Bitwig a device identity for auto-add; control data uses an authenticated
 // local UDP channel that never leaves this Mac.
 host.addDeviceNameBasedDiscoveryPair(["Control Deck Bridge In"], ["Control Deck Bridge Out"]);
 
-var CONTROL_DECK_VERSION = "1.0.0";
+var CONTROL_DECK_VERSION = "1.0.1";
 var CONTROL_DECK_PROTOCOL = "control-deck/1";
 var CONTROL_DECK_PORT = 50701;
 // Stamped with a per-install secret by `npm run setup`. The bridge refuses to
@@ -63,14 +63,27 @@ var trackMeterLatest = [];
 var trackMeterMaximum = [];
 var requestQueue = [];
 var requestBusy = false;
+var currentRequest = null;
+// Requests from older clients carry no timeout; outlast the longest tool call.
+var DEFAULT_REQUEST_LIMIT_MS = 130000;
 
 function interested(value) {
    value.markInterested();
    return value;
 }
 
+// Every delayed step runs through here. An exception in a step used to leave the
+// bridge busy forever; now it fails the request that scheduled the step instead.
 function later(delay, callback) {
-   host.scheduleTask(callback, delay);
+   var owner = currentRequest;
+   host.scheduleTask(function() {
+      try {
+         callback();
+      } catch (error) {
+         host.errorln("Control Deck step error: " + error);
+         if (owner && !owner.done) finish(owner, false, { message: String(error.message || error) });
+      }
+   }, delay);
 }
 
 function arrayCopy(values) {
@@ -431,16 +444,35 @@ function respond(replyPort, id, ok, payload) {
    }
 }
 
+// Each request is answered exactly once. Late steps of a request that already
+// failed or timed out are ignored, so they can't release the next request early.
 function finish(request, ok, payload) {
+   if (request.done) return;
+   request.done = true;
    respond(request.source, request.id, ok, payload);
-   requestBusy = false;
-   later(1, processNextRequest);
+   if (currentRequest === request) {
+      currentRequest = null;
+      requestBusy = false;
+      later(1, processNextRequest);
+   }
 }
 
 function processNextRequest() {
-   if (requestBusy || requestQueue.length === 0) return;
+   if (requestBusy) return;
+   var now = Date.now();
+   // The client stops waiting at its deadline, so don't start work nobody is waiting for.
+   while (requestQueue.length && requestQueue[0].deadline < now) requestQueue.shift();
+   if (requestQueue.length === 0) return;
    requestBusy = true;
    var request = requestQueue.shift();
+   currentRequest = request;
+   host.scheduleTask(function() {
+      if (!request.done) {
+         finish(request, false, {
+            message: "Bitwig did not finish " + request.method + " within " + request.limitMs + " ms. The bridge has recovered and is ready for the next request."
+         });
+      }
+   }, request.limitMs);
    try {
       dispatch(request);
    } catch (error) {
@@ -448,12 +480,21 @@ function processNextRequest() {
    }
 }
 
-function enqueue(source, id, method, params) {
+function enqueue(source, id, method, params, timeoutMs) {
    if (requestQueue.length >= 32) {
       respond(source, id, false, { message: "Control Deck Bridge is busy. Try the request again." });
       return;
    }
-   requestQueue.push({ source: source, id: id, method: method, params: params || {} });
+   var clientTimeout = Number(timeoutMs);
+   var hasTimeout = isFinite(clientTimeout) && clientTimeout > 0;
+   requestQueue.push({
+      source: source,
+      id: id,
+      method: method,
+      params: params || {},
+      deadline: hasTimeout ? Date.now() + clientTimeout : Infinity,
+      limitMs: hasTimeout ? Math.max(1000, clientTimeout + 1000) : DEFAULT_REQUEST_LIMIT_MS
+   });
    processNextRequest();
 }
 
@@ -992,6 +1033,26 @@ function handleSaveDevicePreset(request) {
    });
 }
 
+// Re-reads Bitwig until check() reports no mismatch (returns "") or about a
+// second passes, then fails the request with what Bitwig actually holds.
+function verifyReadback(request, check, onVerified, attempt) {
+   attempt = attempt || 1;
+   later(100, function() {
+      var mismatch = check();
+      if (!mismatch) {
+         onVerified();
+      } else if (attempt >= 10) {
+         finish(request, false, { message: "Bitwig did not confirm the change: " + mismatch });
+      } else {
+         verifyReadback(request, check, onVerified, attempt + 1);
+      }
+   });
+}
+
+function differs(actual, requested, tolerance) {
+   return !(Math.abs(Number(actual) - Number(requested)) <= tolerance);
+}
+
 function handleTransport(request) {
    var params = request.params;
    var action = String(params.action || "status");
@@ -1002,6 +1063,13 @@ function handleTransport(request) {
       var tempo = Number(params.tempo);
       if (!(tempo >= 20 && tempo <= 666)) throw new Error("Tempo must be between 20 and 666 BPM.");
       transport.tempo().value().setRaw(tempo);
+      verifyReadback(request, function() {
+         var actual = transport.tempo().value().getRaw();
+         return differs(actual, tempo, 0.01) ? "tempo is " + actual + " BPM, requested " + tempo + " BPM." : "";
+      }, function() {
+         finish(request, true, readTransport());
+      });
+      return;
    } else if (action === "set_position") {
       var position = Number(params.positionBeats);
       if (!(position >= 0)) throw new Error("Position must be zero or greater.");
@@ -1238,7 +1306,23 @@ function handleSetTrackMix(request) {
    if (params.mute !== undefined) track.mute().set(Boolean(params.mute));
    if (params.solo !== undefined) track.solo().set(Boolean(params.solo));
    if (params.arm !== undefined) track.arm().set(Boolean(params.arm));
-   later(120, function() {
+   verifyReadback(request, function() {
+      var problems = [];
+      if (params.volumeNormalized !== undefined && differs(track.volume().get(), params.volumeNormalized, 0.002)) {
+         problems.push("volume is " + track.volume().get() + ", requested " + params.volumeNormalized);
+      }
+      if (params.panNormalized !== undefined && differs(track.pan().get(), params.panNormalized, 0.002)) {
+         problems.push("pan is " + track.pan().get() + ", requested " + params.panNormalized);
+      }
+      var switches = ["mute", "solo", "arm"];
+      for (var i = 0; i < switches.length; i++) {
+         var name = switches[i];
+         if (params[name] !== undefined && track[name]().get() !== Boolean(params[name])) {
+            problems.push(name + " is " + track[name]().get() + ", requested " + Boolean(params[name]));
+         }
+      }
+      return problems.join("; ");
+   }, function() {
       finish(request, true, { track: trackSnapshot(track, Number(params.trackIndex)) });
    });
 }
@@ -1732,7 +1816,11 @@ function handleRecordLauncherArrangement(request) {
       return a.type === "stop" ? -1 : 1;
    });
 
-   var restoreTempo = Number(request.params.restoreTempo || 122);
+   // Recording runs at an accelerated tempo; put the project's own tempo back
+   // afterwards unless the caller asks for a specific one.
+   var restoreTempo = request.params.restoreTempo === undefined || request.params.restoreTempo === null
+      ? transport.tempo().value().getRaw()
+      : Number(request.params.restoreTempo);
    if (!(restoreTempo >= 20 && restoreTempo <= 666)) throw new Error("Restore tempo must be between 20 and 666 BPM.");
    var originalLoopEnabled = transport.isArrangerLoopEnabled().get();
    var originalPosition = transport.getPosition().get();
@@ -2247,6 +2335,14 @@ function dispatch(request) {
                control.setImmediately(requested);
                later(400, function() {
                   var actual = control.get();
+                  if (differs(actual, requested, 0.02)) {
+                     finish(request, false, {
+                        message: "Bitwig did not confirm ‘" + control.name().get() + "’: it reads " + actual +
+                           " (" + control.displayedValue().get() + "), requested " + requested +
+                           ". The control may snap to fixed steps."
+                     });
+                     return;
+                  }
                   finish(request, true, {
                      pageIndex: pageIndex,
                      pageName: pageNames[pageIndex],
@@ -2295,6 +2391,14 @@ function dispatch(request) {
                function reply(mode, writtenValue) {
                   actual = directValues[id];
                   difference = actual === undefined ? null : Math.abs(actual - requested);
+                  if (!(actual !== undefined && difference <= 0.02)) {
+                     finish(request, false, {
+                        message: "Bitwig did not confirm parameter ‘" + (directNames[id] || id) + "’: it reads " +
+                           (actual === undefined ? "no value" : actual) + ", requested " + requested +
+                           ". The parameter may snap to fixed steps or ignore remote changes."
+                     });
+                     return;
+                  }
                   finish(request, true, {
                      parameter: parameterSnapshot(id),
                      requestedNormalizedValue: requested,
@@ -2576,7 +2680,7 @@ function init() {
             respond(replyPort, request.id, false, { message: "Control Deck authentication failed." });
             return;
          }
-         enqueue(replyPort, String(request.id), String(request.method), request.params || {});
+         enqueue(replyPort, String(request.id), String(request.method), request.params || {}, request.timeoutMs);
       } catch (error) {
          host.println("Control Deck request error: " + error);
          if (request && request.id && request.replyPort) {
