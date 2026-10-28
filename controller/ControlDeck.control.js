@@ -1553,6 +1553,53 @@ function handleCreateNoteClip(request) {
    });
 }
 
+function handleClipNotes(request) {
+   var params = request.params;
+   var slotIndex = Number(params.slotIndex);
+   var stepSize = Number(params.stepSize || 0.25);
+   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
+      throw new Error("Clip slot must be between 0 and " + (MAX_SCENES - 1) + ".");
+   }
+   if (!(stepSize >= 0.03125 && stepSize <= 4)) throw new Error("Clip step size must be between 1/128 and 4 beats.");
+
+   selectTrack(request, params, function(track) {
+      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
+      if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip.");
+      slot.select();
+      slot.showInEditor();
+      later(240, function() {
+         try {
+            if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
+            var loopStart = launcherClip.getLoopStart().get();
+            var loopLength = launcherClip.getLoopLength().get();
+            var lengthBeats = loopStart + loopLength;
+            if (!(lengthBeats > 0 && lengthBeats <= 512)) {
+               throw new Error("Clips must end within 512 beats to be read; this one ends at beat " + lengthBeats + ".");
+            }
+            readLauncherNotes(lengthBeats, stepSize, function(error, notes) {
+               if (error) {
+                  finish(request, false, { message: String(error.message || error) });
+                  return;
+               }
+               finish(request, true, {
+                  track: { index: params.trackIndex, name: params.trackName },
+                  clip: clipSnapshot(slot, slotIndex),
+                  lengthBeats: lengthBeats,
+                  loopStartBeats: loopStart,
+                  loopLengthBeats: loopLength,
+                  stepSize: stepSize,
+                  quantized: true,
+                  noteCount: notes.length,
+                  notes: notes
+               });
+            });
+         } catch (error) {
+            finish(request, false, { message: String(error.message || error) });
+         }
+      });
+   });
+}
+
 function readLauncherTemplate(track, slotIndex, callback) {
    try {
       var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
@@ -2174,6 +2221,9 @@ function dispatch(request) {
          return;
       case "create_note_clip":
          handleCreateNoteClip(request);
+         return;
+      case "clip_notes":
+         handleClipNotes(request);
          return;
       case "arrange_launcher_clips":
          handleRecordLauncherArrangement(request);

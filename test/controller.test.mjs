@@ -247,6 +247,71 @@ function withClip(options = {}) {
   return { ...loaded, clip, slot, track };
 }
 
+const TRACK = { trackIndex: 0, trackName: "Inst 1" };
+
+test("clip_notes reads every note from the step grid across pages and channels", () => {
+  const notes = [
+    { beat: 0, pitch: 60, velocity: 100, duration: 0.5 },
+    { beat: 0, pitch: 64, velocity: 90, duration: 0.25, channel: 3 },
+    { beat: 70.5, pitch: 67, velocity: 1, duration: 1, muted: true },
+    { beat: 127.75, pitch: 127, velocity: 127, duration: 0.25 }
+  ];
+  const { context, responses, advance } = withClip({ notes, loopLength: 128 });
+  context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 0 }, 60000);
+  advance(5000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  const payload = responses[0].payload;
+  assert.equal(payload.quantized, true);
+  assert.equal(payload.lengthBeats, 128);
+  assert.equal(payload.noteCount, 4);
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.notes)), [
+    { beat: 0, pitch: 60, velocity: 100, duration: 0.5, channel: 0, muted: false },
+    { beat: 0, pitch: 64, velocity: 90, duration: 0.25, channel: 3, muted: false },
+    { beat: 70.5, pitch: 67, velocity: 1, duration: 1, channel: 0, muted: true },
+    { beat: 127.75, pitch: 127, velocity: 127, duration: 0.25, channel: 0, muted: false }
+  ]);
+});
+
+test("clip_notes snaps notes that start between steps to the step they start in", () => {
+  const { context, responses, advance } = withClip({ notes: [{ beat: 1.1, pitch: 60, velocity: 100, duration: 0.25 }] });
+  context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 0, stepSize: 0.25 }, 60000);
+  advance(2000);
+  assert.equal(responses[0].payload.notes[0].beat, 1);
+  assert.equal(responses[0].payload.quantized, true);
+});
+
+test("clip_notes ignores notes past the end of the clip", () => {
+  const { context, responses, advance } = withClip({ notes: [{ beat: 2, pitch: 60, velocity: 100, duration: 1 }, { beat: 6, pitch: 61, velocity: 100, duration: 1 }], loopLength: 4 });
+  context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 0 }, 60000);
+  advance(2000);
+  assert.deepEqual([...responses[0].payload.notes.map(n => n.pitch)], [60]);
+});
+
+test("clip_notes fails on an empty slot", () => {
+  const { context, responses, advance } = withClip({ slot: { hasContent: false } });
+  context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 2 }, 60000);
+  advance(2000);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /Clip slot 2 has no clip/);
+});
+
+test("clip_notes fails when Bitwig does not expose the clip", () => {
+  const { context, responses, advance, clip } = withClip();
+  clip.state.exists = false;
+  context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 0 }, 60000);
+  advance(2000);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /did not expose the launcher clip/);
+});
+
+test("clip_notes skips observer cells that getStep no longer confirms", () => {
+  const { context, responses, advance } = withClip({ notes: [{ beat: 0, pitch: 60, velocity: 100, duration: 1 }] });
+  context.launcherNoteCells["0:5:70"] = true;
+  context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 0 }, 60000);
+  advance(2000);
+  assert.deepEqual([...responses[0].payload.notes.map(n => n.pitch)], [60]);
+});
+
 test("the launcher template reader keeps every channel and a minimum one-step duration", () => {
   const { context, track, advance } = withClip({ notes: [
     { beat: 0, pitch: 60, velocity: 100, duration: 0.1 },
