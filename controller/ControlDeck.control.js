@@ -36,7 +36,6 @@ var cursorDeviceSlot;
 var cursorRemoteControlsPage;
 var nestedDeviceBank;
 var launcherClip;
-var arrangerClip;
 var sceneBank;
 var popupBrowser;
 var resultColumn;
@@ -52,13 +51,6 @@ var directValues = {};
 var directDisplays = {};
 var directDisplayObserver;
 var saveToLibraryAction;
-var focusArrangerAction;
-var focusClipLauncherAction;
-var deselectAllAction;
-var copyAction;
-var pasteAction;
-var pasteReferenceAction;
-var copyLauncherToArrangerAction;
 var jumpToBeginningAction;
 var trackMeterLatest = [];
 var trackMeterMaximum = [];
@@ -1658,251 +1650,6 @@ function handleClipNotes(request) {
    });
 }
 
-function readLauncherTemplate(track, slotIndex, callback) {
-   try {
-      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
-      if (!slot.hasContent().get()) throw new Error("Source launcher slot " + slotIndex + " has no clip.");
-      slot.select();
-      slot.showInEditor();
-      later(240, function() {
-         try {
-            if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the source launcher clip.");
-            var stepSize = 0.25;
-            var loopLength = launcherClip.getLoopLength().get();
-            if (!(loopLength > 0 && loopLength <= 64)) {
-               throw new Error("Source launcher clips must be between 0 and 64 beats long.");
-            }
-            readLauncherNotes(loopLength, stepSize, function(error, read) {
-               if (error) {
-                  callback(error);
-                  return;
-               }
-               var notes = read.map(function(note) {
-                  return { beat: note.beat, pitch: note.pitch, velocity: note.velocity, duration: Math.max(stepSize, note.duration), channel: note.channel };
-               });
-               if (!notes.length) {
-                  callback(new Error("The source launcher clip contains no readable MIDI notes."));
-                  return;
-               }
-               callback(null, { lengthBeats: loopLength, stepSize: stepSize, notes: notes });
-            });
-         } catch (error) {
-            callback(error);
-         }
-      });
-   } catch (error) {
-      callback(error);
-   }
-}
-
-function handleArrangeLauncherClips(request) {
-   var params = request.params;
-   var regions = params.regions || [];
-   if (!regions.length) throw new Error("At least one Arranger clip region is required.");
-   if (regions.length > 64) throw new Error("A maximum of 64 Arranger clip regions can be created at once.");
-
-   var normalized = [];
-   for (var regionIndex = 0; regionIndex < regions.length; regionIndex++) {
-      var region = regions[regionIndex] || {};
-      var track = requireTrack(region);
-      var slotIndex = Number(region.slotIndex);
-      var startBeats = Number(region.startBeats);
-      var lengthBeats = Number(region.lengthBeats);
-      var clipName = String(region.clipName || "").trim();
-      if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-         throw new Error("Region " + regionIndex + " has an invalid launcher slot.");
-      }
-      if (!(startBeats >= 0)) throw new Error("Region " + regionIndex + " has an invalid start position.");
-      if (!(lengthBeats >= 1 && lengthBeats <= 512) || Math.floor(lengthBeats) !== lengthBeats) {
-         throw new Error("Region " + regionIndex + " must be between 1 and 512 whole beats long.");
-      }
-      if (!clipName) throw new Error("Region " + regionIndex + " needs a clip name.");
-      normalized.push({
-         track: track,
-         trackIndex: Number(region.trackIndex),
-         trackName: String(region.trackName),
-         slotIndex: slotIndex,
-         startBeats: startBeats,
-         lengthBeats: lengthBeats,
-         clipName: clipName
-      });
-   }
-
-   var originalTransportPosition = transport.getPosition().get();
-   var templates = {};
-   var created = [];
-   var current = 0;
-
-   function restoreAndFinish(ok, payload) {
-      transport.setPosition(originalTransportPosition);
-      later(180, function() { finish(request, ok, payload); });
-   }
-
-   function createRegion(region, template) {
-      var repeatedNotes = [];
-      for (var offset = 0; offset < region.lengthBeats; offset += template.lengthBeats) {
-         for (var noteIndex = 0; noteIndex < template.notes.length; noteIndex++) {
-            var sourceNote = template.notes[noteIndex];
-            if (offset + sourceNote.beat >= region.lengthBeats) continue;
-            repeatedNotes.push({
-               beat: offset + sourceNote.beat,
-               pitch: sourceNote.pitch,
-               velocity: sourceNote.velocity,
-               duration: Math.min(sourceNote.duration, region.lengthBeats - (offset + sourceNote.beat)),
-               channel: sourceNote.channel
-            });
-         }
-      }
-      var validated = validateClipNotes(repeatedNotes, template.stepSize, region.lengthBeats);
-
-      var sourceSlot = region.track.clipLauncherSlotBank().getItemAt(region.slotIndex);
-      deselectAllAction.invoke();
-      region.track.selectInMixer();
-      focusClipLauncherAction.invoke();
-      later(120, function() {
-         try {
-            sourceSlot.select();
-            later(120, function() {
-               try {
-                  copyAction.invoke();
-                  later(120, function() {
-                     try {
-                        focusArrangerAction.invoke();
-                        region.track.makeVisibleInArranger();
-                        later(120, function() {
-                           try {
-                              deselectAllAction.invoke();
-                              region.track.selectInMixer();
-                              transport.setPosition(region.startBeats);
-                              var positionAttempts = 0;
-
-                              function waitForPosition() {
-                                 try {
-                                    if (Math.abs(transport.getPosition().get() - region.startBeats) >= 0.0001) {
-                                       if (positionAttempts++ < 25) {
-                                          later(100, waitForPosition);
-                                          return;
-                                       }
-                                       throw new Error("Bitwig did not verify the Arranger clip start position.");
-                                    }
-
-                                    pasteReferenceAction.invoke();
-                                    var createAttempts = 0;
-                                    function waitForClip() {
-                                       try {
-                                          if (!arrangerClip.exists().get()) {
-                                             if (createAttempts++ < 25) {
-                                                later(100, waitForClip);
-                                                return;
-                                             }
-                                             throw new Error("Bitwig did not paste the Launcher clip into the Arranger.");
-                                          }
-
-                                          arrangerClip.setStepSize(template.stepSize);
-                                          arrangerClip.scrollToKey(0);
-                                          arrangerClip.scrollToStep(0);
-                                          arrangerClip.clearSteps();
-                                          arrangerClip.setName(region.clipName);
-                                          arrangerClip.getLoopStart().set(0);
-                                          arrangerClip.getLoopLength().set(region.lengthBeats);
-                                          arrangerClip.getPlayStart().set(0);
-                                          arrangerClip.getPlayStop().set(region.lengthBeats);
-                                          arrangerClip.isLoopEnabled().set(false);
-                                          writeClipPages(arrangerClip, validated, 0, function(error) {
-                                             if (error) {
-                                                restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                                return;
-                                             }
-                                             later(260, function() {
-                                                try {
-                                                   if (arrangerClip.getPlayStop().get() !== region.lengthBeats) {
-                                                      throw new Error("Bitwig did not verify the Arranger clip length.");
-                                                   }
-                                                   created.push({
-                                                      trackIndex: region.trackIndex,
-                                                      trackName: region.trackName,
-                                                      slotIndex: region.slotIndex,
-                                                      startBeats: region.startBeats,
-                                                      lengthBeats: region.lengthBeats,
-                                                      clipName: arrangerClip.exists().get() ? region.clipName : null,
-                                                      notesWritten: validated.noteCount
-                                                   });
-                                                   processNext();
-                                                } catch (error) {
-                                                   restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                                }
-                                             });
-                                          });
-                                       } catch (error) {
-                                          restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                       }
-                                    }
-                                    later(180, waitForClip);
-                                 } catch (error) {
-                                    restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                 }
-                              }
-                              later(100, waitForPosition);
-                           } catch (error) {
-                              restoreAndFinish(false, { message: String(error.message || error), created: created });
-                           }
-                        });
-                     } catch (error) {
-                        restoreAndFinish(false, { message: String(error.message || error), created: created });
-                     }
-                  });
-               } catch (error) {
-                  restoreAndFinish(false, { message: String(error.message || error), created: created });
-               }
-            });
-         } catch (error) {
-            restoreAndFinish(false, { message: String(error.message || error), created: created });
-         }
-      });
-   }
-
-   function processNext() {
-      try {
-         if (current >= normalized.length) {
-            var returnedTracks = {};
-            for (var regionIndex = 0; regionIndex < normalized.length; regionIndex++) {
-               var normalizedRegion = normalized[regionIndex];
-               var returnKey = String(normalizedRegion.trackIndex);
-               if (!returnedTracks[returnKey]) {
-                  normalizedRegion.track.returnToArrangement();
-                  returnedTracks[returnKey] = true;
-               }
-            }
-            restoreAndFinish(true, {
-               created: created.length,
-               verified: created.length,
-               clips: created
-            });
-            return;
-         }
-
-         var region = normalized[current++];
-         var templateKey = region.trackIndex + ":" + region.slotIndex;
-         if (templates[templateKey]) {
-            createRegion(region, templates[templateKey]);
-            return;
-         }
-         readLauncherTemplate(region.track, region.slotIndex, function(error, template) {
-            if (error) {
-               restoreAndFinish(false, { message: String(error.message || error), created: created });
-               return;
-            }
-            templates[templateKey] = template;
-            createRegion(region, template);
-         });
-      } catch (error) {
-         restoreAndFinish(false, { message: String(error.message || error), created: created });
-      }
-   }
-
-   processNext();
-}
-
 function handleRecordLauncherArrangement(request) {
    var specifications = request.params.regions || [];
    if (!specifications.length) throw new Error("At least one arrangement region is required.");
@@ -2664,7 +2411,6 @@ function init() {
    nestedDeviceBank = cursorDeviceSlot.createDeviceBank(MAX_DEVICES);
    deviceBank = cursorTrack.createDeviceBank(MAX_DEVICES);
    launcherClip = host.createLauncherCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
-   arrangerClip = host.createArrangerCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
    launcherClip.addNoteStepObserver(onLauncherNoteStep);
 
    interested(application.projectName());
@@ -2714,12 +2460,6 @@ function init() {
    interested(launcherClip.getPlayStart());
    interested(launcherClip.getPlayStop());
    interested(launcherClip.isLoopEnabled());
-   interested(arrangerClip.exists());
-   interested(arrangerClip.getLoopStart());
-   interested(arrangerClip.getLoopLength());
-   interested(arrangerClip.getPlayStart());
-   interested(arrangerClip.getPlayStop());
-   interested(arrangerClip.isLoopEnabled());
 
    interested(transport.isPlaying());
    interested(transport.isArrangerRecordEnabled());
@@ -2763,13 +2503,6 @@ function init() {
       directDisplays[String(id)] = String(value);
    });
    saveToLibraryAction = application.getAction("add_to_library");
-   focusArrangerAction = application.getAction("focus_or_toggle_arranger");
-   focusClipLauncherAction = application.getAction("focus_or_toggle_clip_launcher");
-   deselectAllAction = application.getAction("Unselect All");
-   copyAction = application.getAction("Copy");
-   pasteAction = application.getAction("Paste");
-   pasteReferenceAction = application.getAction("Paste Reference");
-   copyLauncherToArrangerAction = application.getAction("copy_launcher_clips_to_arranger");
    jumpToBeginningAction = application.getAction("jump_to_beginning_of_arrangement");
    popupBrowser = host.createPopupBrowser();
    resultColumn = popupBrowser.resultsColumn();
