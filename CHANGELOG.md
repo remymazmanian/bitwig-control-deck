@@ -4,6 +4,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-28
+
+Adds note read-back for launcher clips and checks every note clip write against what Bitwig reports. Tested in Bitwig Studio 6.1.3 with 16- and 128-beat clips, grids down to 1/128 notes, and notes on several MIDI channels.
+
+### Added
+
+- `bitwig_clip_notes` reads every note in a launcher clip, with start, pitch, velocity, length, MIDI channel and mute state, across all 16 channels and the full clip length.
+
+### Changed
+
+- `bitwig_create_note_clip` re-reads the clip after writing and reports an error if any note is missing, changed or extra. The result now includes `notesVerified`.
+- Note clip writes can take up to 120 seconds, up from 30, to leave room for the read-back on long clips.
+- `bitwig_arrange_launcher_clips` keeps notes on every MIDI channel when it copies clip notes, not only channel 1.
+
 ## [1.0.2] - 2026-10-11
 
 ### Fixed
@@ -51,7 +65,8 @@ First release of Bitwig Control Deck, a local MCP bridge that lets an AI agent c
 - Local dashboard at `http://127.0.0.1:50703` showing bridge health, the current session, loaded devices and a searchable inventory of installed VST3, VST2, Audio Unit and CLAP plug-ins. Its Connect page has copy-paste setup guides for Claude Code, Codex, Cursor, VS Code, Gemini CLI, local LLM setups and other MCP clients.
 - Local operation: the status service and dashboard listen on this Mac only, and every request to the Bitwig bridge must carry a secret generated for your install.
 
-https://github.com/remymazmanian/bitwig-control-deck/compare/v1.0.2...HEAD
+https://github.com/remymazmanian/bitwig-control-deck/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.1.0
 [1.0.2]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.0.2
 [1.0.1]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.0.1
 [1.0.0]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.0.0

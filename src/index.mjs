@@ -7,7 +7,7 @@ import { BitwigClient } from "./bitwig-client.mjs";
 import { buildPluginIndex, readPluginIndex, searchPluginIndex } from "./plugin-index.mjs";
 
 const client = new BitwigClient();
-const server = new McpServer({ name: "Bitwig Control Deck", version: "1.0.2" });
+const server = new McpServer({ name: "Bitwig Control Deck", version: "1.1.0" });
 const logDirectory = new URL("../logs/", import.meta.url);
 const logFile = new URL("control-deck.jsonl", logDirectory);
 
