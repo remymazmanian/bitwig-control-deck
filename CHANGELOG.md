@@ -4,6 +4,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `bitwig_actions` now matches case-insensitively after trimming the query, and reports `totalActions` and `matched` alongside up to 100 actions.
+- `bitwig_status` reports `audioEngineActive`.
+
+### Removed
+
+- The bridge methods `audio_engine`, `restart_bridge`, `selection_state` and `list_actions`. No MCP tool, dashboard view or script used them. `list_actions` was a second copy of the action search and is now the only one, behind `bitwig_actions`. Engine on/off switching could cut audio during a session, so only the read-only engine state remains, in `bitwig_status`. `restart_bridge` could not help a stuck bridge because it waited in the same request queue, and `selection_state` repeated what `bitwig_status` and `bitwig_devices` already report.
+
 ## [1.1.0] - 2026-10-28
 
 Adds note read-back for launcher clips and checks every note clip write against what Bitwig reports. Tested in Bitwig Studio 6.1.3 with 16- and 128-beat clips, grids down to 1/128 notes, and notes on several MIDI channels.

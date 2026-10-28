@@ -114,8 +114,8 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 
 ### Status & session
 
-- **bitwig_status** — Check Control Deck Bridge, Bitwig, the current project, transport, and current selection.
-- **bitwig_actions** — Search Bitwig Studio's native action registry by action id, name, or menu text.
+- **bitwig_status** — Check Control Deck Bridge, Bitwig, the current project, transport, current selection, and whether Bitwig's audio engine is on.
+- **bitwig_actions** — Search Bitwig Studio's native action registry by action id, name, or menu text. Matching ignores case, returns up to 100 actions, and reports how many matched in total.
 - **bitwig_invoke_action** — Invoke one exact Bitwig action id previously returned by `bitwig_actions`.
 - **bitwig_transport** — Read or control Bitwig transport. Tempo changes are read back before success is reported.
 - **bitwig_track_meters** — Read peak signal activity captured for every track, or reset the captured maxima before a playback test.
