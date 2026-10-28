@@ -165,3 +165,110 @@ test("set_track_mix fails with the values Bitwig actually holds", () => {
   assert.equal(responses[0].ok, false);
   assert.match(responses[0].payload.message, /volume is 0.5, requested 0.7; mute is false, requested true/);
 });
+
+// Fake launcher cursor clip. Notes live at absolute beats; the visible grid is
+// CLIP_GRID_WIDTH steps from the scroll position, and every scroll or step-size
+// change reports changed cells through the controller's note-step observer,
+// the way Bitwig does. Notes off the grid show up at the step they start in.
+function fakeLauncherClip(context, { notes = [], loopStart = 0, loopLength = 4, onWrite } = {}) {
+  const width = context.CLIP_GRID_WIDTH;
+  const state = { notes: notes.map(n => ({ channel: 0, muted: false, ...n })), stepSize: 0.25, scroll: 0, visible: new Set(), exists: true };
+  const stepOf = note => Math.floor(note.beat / state.stepSize + 1e-9);
+  const noteAt = (channel, x, y) => state.notes.find(n => n.channel === channel && n.pitch === y && stepOf(n) === state.scroll + x);
+  const step = (channel, x, y) => {
+    const note = noteAt(channel, x, y);
+    return {
+      channel: () => channel, x: () => x, y: () => y,
+      state: () => (note ? "NoteOn" : "Empty"),
+      velocity: () => (note ? note.velocity / 127 : 0),
+      duration: () => (note ? note.duration : 0),
+      isMuted: () => (note ? note.muted : false)
+    };
+  };
+  function refresh() {
+    const next = new Set();
+    for (const note of state.notes) {
+      const x = stepOf(note) - state.scroll;
+      if (x >= 0 && x < width) next.add(`${note.channel}:${x}:${note.pitch}`);
+    }
+    for (const key of state.visible) if (!next.has(key)) context.onLauncherNoteStep(step(...key.split(":").map(Number)));
+    for (const key of next) context.onLauncherNoteStep(step(...key.split(":").map(Number)));
+    state.visible = next;
+  }
+  const value = (get, set) => ({ get, set: set || (() => {}) });
+  const clip = {
+    state,
+    exists: () => value(() => state.exists),
+    getLoopStart: () => value(() => loopStart, v => { loopStart = v; }),
+    getLoopLength: () => value(() => loopLength, v => { loopLength = v; }),
+    getPlayStart: () => value(() => 0),
+    getPlayStop: () => value(() => loopLength),
+    isLoopEnabled: () => value(() => true),
+    setName() {},
+    setStepSize(size) { state.stepSize = size; refresh(); },
+    scrollToKey() {},
+    scrollToStep(position) { state.scroll = position; refresh(); },
+    getStep: step,
+    setStep(channel, x, pitch, velocity, duration) {
+      let note = { beat: (state.scroll + x) * state.stepSize, pitch, velocity, duration, channel, muted: false };
+      if (onWrite) note = onWrite(note);
+      if (note) state.notes.push(note);
+      refresh();
+    }
+  };
+  return clip;
+}
+
+function fakeSlot({ hasContent = true } = {}) {
+  const slot = {
+    content: hasContent,
+    exists: () => ({ get: () => true }),
+    name: () => ({ get: () => "Clip" }),
+    hasContent: () => ({ get: () => slot.content }),
+    isSelected: () => ({ get: () => true }),
+    isPlaying: () => ({ get: () => false }),
+    select() {}, showInEditor() {}, deleteObject() { slot.content = false; },
+    createEmptyClip() { slot.content = true; }
+  };
+  return slot;
+}
+
+function withClip(options = {}) {
+  const loaded = loadController();
+  const { context } = loaded;
+  context.dispatch = loaded.originalDispatch;
+  const clip = fakeLauncherClip(context, options);
+  const slot = fakeSlot(options.slot);
+  const track = { clipLauncherSlotBank: () => ({ getItemAt: () => slot }) };
+  context.launcherClip = clip;
+  context.selectTrack = (request, params, callback) => {
+    try { callback(track); } catch (error) { context.finish(request, false, { message: String(error.message || error) }); }
+  };
+  return { ...loaded, clip, slot, track };
+}
+
+test("the launcher template reader keeps every channel and a minimum one-step duration", () => {
+  const { context, track, advance } = withClip({ notes: [
+    { beat: 0, pitch: 60, velocity: 100, duration: 0.1 },
+    { beat: 1, pitch: 62, velocity: 80, duration: 1, channel: 9 }
+  ] });
+  let result;
+  context.readLauncherTemplate(track, 0, (error, template) => { result = { error, template }; });
+  advance(2000);
+  assert.equal(result.error, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.template)), {
+    lengthBeats: 4, stepSize: 0.25,
+    notes: [
+      { beat: 0, pitch: 60, velocity: 100, duration: 0.25, channel: 0 },
+      { beat: 1, pitch: 62, velocity: 80, duration: 1, channel: 9 }
+    ]
+  });
+});
+
+test("the launcher template reader refuses a clip with no notes", () => {
+  const { context, track, advance } = withClip({ notes: [] });
+  let result;
+  context.readLauncherTemplate(track, 0, error => { result = error; });
+  advance(2000);
+  assert.match(String(result && result.message), /contains no readable MIDI notes/);
+});
