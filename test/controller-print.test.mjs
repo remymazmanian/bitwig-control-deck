@@ -69,6 +69,7 @@ function setup(options = {}) {
   context.requireTrack = params => state.tracks[params.trackIndex];
   context.jumpToBeginningAction = { invoke: () => { state.jumps++; state.position = 0; } };
   context.project = { isModified: () => value(() => true) };
+  context.sceneBank = { scrollPosition: () => value(() => 0) };
   return { ...loaded, state };
 }
 
