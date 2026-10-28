@@ -200,7 +200,7 @@ server.registerTool("bitwig_save_device_preset", {
 }, async args => call("save_device_preset", args, 15000));
 
 server.registerTool("bitwig_create_note_clip", {
-  description: "Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content.",
+  description: "Create or replace a launcher MIDI clip on one exact instrument track, write its complete note content, and read every note back; any missing, changed, or extra note fails the call.",
   inputSchema: {
     ...trackSelector,
     slotIndex: z.number().int().min(0).max(7).default(0),
@@ -216,7 +216,7 @@ server.registerTool("bitwig_create_note_clip", {
       channel: z.number().int().min(0).max(15).default(0)
     })).max(750).describe("Up to 750 notes per clip; one request to Bitwig must fit in a single 60 KB message")
   }
-}, async args => call("create_note_clip", args, 30000));
+}, async args => call("create_note_clip", args, 120000));
 
 server.registerTool("bitwig_arrange_launcher_clips", {
   description: "Record existing launcher clips into Bitwig's Arranger across exact requested beat regions, merging contiguous regions and restoring the project tempo afterward.",

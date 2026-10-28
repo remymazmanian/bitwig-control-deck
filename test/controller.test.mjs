@@ -337,3 +337,68 @@ test("the launcher template reader refuses a clip with no notes", () => {
   advance(2000);
   assert.match(String(result && result.message), /contains no readable MIDI notes/);
 });
+
+const WRITE = {
+  ...TRACK, slotIndex: 0, clipName: "Riff", lengthBeats: 128, stepSize: 0.25,
+  notes: [
+    { beat: 0, pitch: 60, velocity: 100, duration: 0.5 },
+    { beat: 0.5, pitch: 64, velocity: 90, duration: 0.25, channel: 2 },
+    { beat: 96, pitch: 67, velocity: 110, duration: 1 }
+  ]
+};
+
+function createWith(onWrite, params = WRITE) {
+  const run = withClip({ notes: [], loopLength: 0, slot: { hasContent: false }, onWrite });
+  run.context.enqueue(5000, "1", "create_note_clip", params, 60000);
+  run.advance(10000);
+  return run.responses[0];
+}
+
+test("create_note_clip succeeds only after every written note reads back", () => {
+  const response = createWith();
+  assert.equal(response.ok, true, JSON.stringify(response.payload));
+  assert.equal(response.payload.notesWritten, 3);
+  assert.equal(response.payload.notesVerified, 3);
+});
+
+const mismatches = [
+  ["a dropped note", note => (note.pitch === 67 ? null : note), /pitch 67 at beat 96 \(channel 0\) is missing/],
+  ["a wrong velocity", note => ({ ...note, velocity: note.pitch === 60 ? 99 : note.velocity }), /pitch 60 at beat 0 \(channel 0\): velocity is 99, requested 100/],
+  ["a wrong duration", note => ({ ...note, duration: note.pitch === 64 ? 0.5 : note.duration }), /pitch 64 at beat 0.5 \(channel 2\): duration is 0.5, requested 0.25/],
+  ["a shifted pitch", note => ({ ...note, pitch: note.pitch === 60 ? 61 : note.pitch }), /pitch 60 at beat 0 \(channel 0\) is missing.*unexpected pitch 61 at beat 0 \(channel 0\)/],
+  ["a shifted start", note => ({ ...note, beat: note.pitch === 67 ? 96.25 : note.beat }), /pitch 67 at beat 96 \(channel 0\) is missing.*unexpected pitch 67 at beat 96.25/],
+  ["a wrong channel", note => ({ ...note, channel: note.pitch === 64 ? 0 : note.channel }), /pitch 64 at beat 0.5 \(channel 2\) is missing.*unexpected pitch 64 at beat 0.5 \(channel 0\)/],
+  ["a muted note", note => ({ ...note, muted: note.pitch === 60 }), /pitch 60 at beat 0 \(channel 0\): note is muted/]
+];
+
+for (const [name, onWrite, message] of mismatches) {
+  test(`create_note_clip fails loudly on ${name}`, () => {
+    const response = createWith(onWrite);
+    assert.equal(response.ok, false, `expected a failure for ${name}`);
+    assert.match(response.payload.message, /^Note verification failed: clip slot 0 does not match the 3 requested notes after writing\./);
+    assert.match(response.payload.message, message);
+  });
+}
+
+test("create_note_clip fails when Bitwig keeps only one of two notes on the same cell", () => {
+  const params = { ...WRITE, notes: [WRITE.notes[0], { ...WRITE.notes[0] }] };
+  const run = withClip({ notes: [], loopLength: 0, slot: { hasContent: false } });
+  const { clip } = run;
+  const setStep = clip.setStep;
+  clip.setStep = (channel, x, pitch, velocity, duration) => {
+    clip.state.notes = clip.state.notes.filter(n => !(n.channel === channel && n.pitch === pitch && Math.round(n.beat / clip.state.stepSize) === clip.state.scroll + x));
+    setStep(channel, x, pitch, velocity, duration);
+  };
+  run.context.enqueue(5000, "1", "create_note_clip", params, 60000);
+  run.advance(10000);
+  assert.equal(run.responses[0].ok, false);
+  assert.match(run.responses[0].payload.message, /pitch 60 at beat 0 \(channel 0\) is missing/);
+});
+
+test("create_note_clip lists at most five differences and counts the rest", () => {
+  const notes = Array.from({ length: 8 }, (_, i) => ({ beat: i, pitch: 60 + i, velocity: 100, duration: 0.25 }));
+  const response = createWith(() => null, { ...WRITE, notes });
+  assert.equal(response.ok, false);
+  assert.match(response.payload.message, /does not match the 8 requested notes/);
+  assert.match(response.payload.message, /; and 3 more\.$/);
+});
