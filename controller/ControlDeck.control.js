@@ -17,6 +17,9 @@ var MAX_TRACKS = 128;
 var MAX_DEVICES = 64;
 var MAX_SCENES = 8;
 var MAX_CUE_MARKERS = 256;
+// Longest stretch one launcher print records: about 92 seconds at 666 BPM,
+// inside the print's 115-second limit.
+var MAX_PRINT_SPAN_BEATS = 1024;
 var BROWSER_PAGE = 128;
 var MAX_BROWSER_RESULTS = 16384;
 var CLIP_GRID_WIDTH = 256;
@@ -444,6 +447,13 @@ function respond(replyPort, id, ok, payload) {
 // failed or timed out are ignored, so they can't release the next request early.
 function finish(request, ok, payload) {
    if (request.done) return;
+   if (request.cleanup) {
+      try {
+         request.cleanup();
+      } catch (error) {
+         host.errorln("Control Deck cleanup error: " + error);
+      }
+   }
    request.done = true;
    respond(request.source, request.id, ok, payload);
    if (currentRequest === request) {
@@ -1657,6 +1667,7 @@ function handleRecordLauncherArrangement(request) {
 
    var trackPlans = {};
    var orderedTrackPlans = [];
+   var startPosition = Infinity;
    var endBeats = 0;
    for (var regionIndex = 0; regionIndex < specifications.length; regionIndex++) {
       var region = specifications[regionIndex];
@@ -1692,6 +1703,7 @@ function handleRecordLauncherArrangement(request) {
       }
       plan.intervals.push({ start: startBeats, end: startBeats + lengthBeats });
       endBeats = Math.max(endBeats, startBeats + lengthBeats);
+      startPosition = Math.min(startPosition, startBeats);
    }
 
    var events = [];
@@ -1724,52 +1736,80 @@ function handleRecordLauncherArrangement(request) {
       return a.type === "stop" ? -1 : 1;
    });
 
+   var spanBeats = endBeats - startPosition;
+   if (spanBeats > MAX_PRINT_SPAN_BEATS) {
+      throw new Error("The regions run from beat " + startPosition + " to beat " + endBeats + ", " + spanBeats +
+         " beats in one print. One print can cover at most " + MAX_PRINT_SPAN_BEATS + " beats; split it into smaller prints.");
+   }
+
    // Recording runs at an accelerated tempo; put the project's own tempo back
    // afterwards unless the caller asks for a specific one.
    var restoreTempo = request.params.restoreTempo === undefined || request.params.restoreTempo === null
       ? transport.tempo().value().getRaw()
       : Number(request.params.restoreTempo);
    if (!(restoreTempo >= 20 && restoreTempo <= 666)) throw new Error("Restore tempo must be between 20 and 666 BPM.");
-   var originalLoopEnabled = transport.isArrangerLoopEnabled().get();
-   var originalPosition = transport.getPosition().get();
+
+   // Everything the print changes is put back by restoreState, on success, on
+   // any error, and when the watchdog gives up on the request.
+   var saved = {
+      loopEnabled: transport.isArrangerLoopEnabled().get(),
+      position: transport.getPosition().get(),
+      arrangerOverdub: transport.isArrangerOverdubEnabled().get(),
+      launcherOverdub: transport.isClipLauncherOverdubEnabled().get(),
+      armedTracks: []
+   };
+   var trackCount = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   for (var armIndex = 0; armIndex < trackCount; armIndex++) {
+      var candidate = trackBank.getItemAt(armIndex);
+      if (candidate.exists().get() && candidate.arm().get()) saved.armedTracks.push(candidate);
+   }
    var acceleratedTempo = 666;
    var nextEvent = 0;
    var startTimestamp = Date.now();
    var completed = false;
+   var restored = false;
 
-   function fail(error) {
-      if (completed) return;
-      completed = true;
-      transport.stop();
-      transport.isArrangerRecordEnabled().set(false);
-      transport.isArrangerLoopEnabled().set(originalLoopEnabled);
-      transport.tempo().value().setRaw(restoreTempo);
-      transport.setPosition(originalPosition);
-      finish(request, false, { message: String(error.message || error), recordedIntervals: recordedIntervals });
-   }
-
-   function complete() {
-      if (completed) return;
-      completed = true;
+   function restoreState() {
+      if (restored) return;
+      restored = true;
       transport.stop();
       transport.isArrangerRecordEnabled().set(false);
       for (var planIndex = 0; planIndex < orderedTrackPlans.length; planIndex++) {
          orderedTrackPlans[planIndex].track.stop();
          orderedTrackPlans[planIndex].track.returnToArrangement();
       }
-      transport.isArrangerLoopEnabled().set(originalLoopEnabled);
+      transport.isArrangerLoopEnabled().set(saved.loopEnabled);
+      transport.isArrangerOverdubEnabled().set(saved.arrangerOverdub);
+      transport.isClipLauncherOverdubEnabled().set(saved.launcherOverdub);
+      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(true);
       transport.tempo().value().setRaw(restoreTempo);
-      transport.setPosition(originalPosition);
+      transport.setPosition(saved.position);
+   }
+   request.cleanup = restoreState;
+
+   function fail(error) {
+      if (completed) return;
+      completed = true;
+      restoreState();
+      finish(request, false, { message: String(error.message || error), recordedIntervals: recordedIntervals });
+   }
+
+   function complete() {
+      if (completed) return;
+      completed = true;
+      restoreState();
       later(450, function() {
          finish(request, true, {
             recorded: true,
             tracks: orderedTrackPlans.length,
             regionsRequested: specifications.length,
             mergedIntervals: recordedIntervals.length,
+            startBeats: startPosition,
             endBeats: endBeats,
             acceleratedTempo: acceleratedTempo,
             restoredTempo: transport.tempo().value().getRaw(),
             restoredPositionBeats: transport.getPosition().get(),
+            restoredArmedTracks: saved.armedTracks.length,
             durationMs: Date.now() - startTimestamp,
             intervals: recordedIntervals,
             projectModified: project.isModified().get(),
@@ -1781,17 +1821,19 @@ function handleRecordLauncherArrangement(request) {
    function runDueEvents(positionBeats) {
       while (nextEvent < events.length) {
          var event = events[nextEvent];
-         var leadBeats = event.beat === 0 ? 0 : 0.75;
+         var atStart = event.beat === startPosition;
+         var leadBeats = atStart ? 0 : 0.75;
          if (positionBeats < event.beat - leadBeats) break;
          if (event.type === "start") {
             event.plan.track.clipLauncherSlotBank().getItemAt(event.plan.slotIndex)
-               .launchWithOptions(event.beat === 0 ? "none" : "1", "from_start");
+               .launchWithOptions(atStart ? "none" : "1", "from_start");
          } else event.plan.track.stop();
          nextEvent++;
       }
    }
 
    function monitorRecording() {
+      if (completed || restored) return;
       try {
          var positionBeats = transport.getPosition().get();
          runDueEvents(positionBeats);
@@ -1808,42 +1850,70 @@ function handleRecordLauncherArrangement(request) {
       }
    }
 
-   transport.stop();
-   transport.isArrangerRecordEnabled().set(false);
-   transport.isArrangerLoopEnabled().set(false);
-   for (var stopIndex = 0; stopIndex < orderedTrackPlans.length; stopIndex++) orderedTrackPlans[stopIndex].track.stop();
-   transport.tempo().value().setRaw(acceleratedTempo);
-   transport.setPosition(0);
-   jumpToBeginningAction.invoke();
+   function stillArmed() {
+      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) {
+         if (saved.armedTracks[armIndex].arm().get()) return true;
+      }
+      return false;
+   }
+
+   function moveToStart() {
+      transport.setPosition(startPosition);
+      if (startPosition === 0) jumpToBeginningAction.invoke();
+   }
+
+   try {
+      transport.stop();
+      transport.isArrangerRecordEnabled().set(false);
+      transport.isArrangerLoopEnabled().set(false);
+      transport.isArrangerOverdubEnabled().set(false);
+      transport.isClipLauncherOverdubEnabled().set(false);
+      for (var unarmIndex = 0; unarmIndex < saved.armedTracks.length; unarmIndex++) saved.armedTracks[unarmIndex].arm().set(false);
+      for (var stopIndex = 0; stopIndex < orderedTrackPlans.length; stopIndex++) orderedTrackPlans[stopIndex].track.stop();
+      transport.tempo().value().setRaw(acceleratedTempo);
+      moveToStart();
+   } catch (error) {
+      fail(error);
+      return;
+   }
    var preparationAttempts = 0;
+   function retryOr(message) {
+      if (preparationAttempts++ < 30) {
+         later(100, beginWhenReady);
+         return;
+      }
+      throw new Error(message);
+   }
    function beginWhenReady() {
+      if (completed || restored) return;
       try {
          if (Math.abs(transport.tempo().value().getRaw() - acceleratedTempo) > 0.01) {
-            if (preparationAttempts++ < 30) {
-               later(100, beginWhenReady);
-               return;
-            }
-            throw new Error("Bitwig did not verify the temporary recording tempo.");
+            retryOr("Bitwig did not verify the temporary recording tempo.");
+            return;
          }
          if (transport.isArrangerLoopEnabled().get()) {
             transport.isArrangerLoopEnabled().set(false);
-            if (preparationAttempts++ < 30) {
-               later(100, beginWhenReady);
-               return;
-            }
-            throw new Error("Bitwig did not disable the Arranger loop for recording.");
+            retryOr("Bitwig did not disable the Arranger loop for recording.");
+            return;
          }
-         if (Math.abs(transport.getPosition().get()) > 0.01) {
-            transport.setPosition(0);
-            jumpToBeginningAction.invoke();
-            if (preparationAttempts++ < 30) {
-               later(100, beginWhenReady);
-               return;
-            }
-            throw new Error("Bitwig did not verify the arrangement start position.");
+         if (transport.isArrangerOverdubEnabled().get() || transport.isClipLauncherOverdubEnabled().get()) {
+            transport.isArrangerOverdubEnabled().set(false);
+            transport.isClipLauncherOverdubEnabled().set(false);
+            retryOr("Bitwig did not turn off overdub for recording.");
+            return;
+         }
+         if (stillArmed()) {
+            for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(false);
+            retryOr("Bitwig did not disarm the armed tracks for recording.");
+            return;
+         }
+         if (Math.abs(transport.getPosition().get() - startPosition) > 0.01) {
+            moveToStart();
+            retryOr("Bitwig did not verify the recording start position at beat " + startPosition + ".");
+            return;
          }
          transport.isArrangerRecordEnabled().set(true);
-         runDueEvents(0);
+         runDueEvents(startPosition);
          transport.play();
          later(180, function() {
             if (!transport.isPlaying().get()) {
@@ -2464,6 +2534,8 @@ function init() {
    interested(transport.isPlaying());
    interested(transport.isArrangerRecordEnabled());
    interested(transport.isArrangerLoopEnabled());
+   interested(transport.isArrangerOverdubEnabled());
+   interested(transport.isClipLauncherOverdubEnabled());
    interested(transport.tempo().value());
    interested(transport.tempo().value().displayedValue());
    interested(transport.getPosition());

@@ -219,7 +219,7 @@ server.registerTool("bitwig_create_note_clip", {
 }, async args => call("create_note_clip", args, 120000));
 
 server.registerTool("bitwig_arrange_launcher_clips", {
-  description: "Record existing launcher clips into Bitwig's Arranger across exact requested beat regions, merging contiguous regions and restoring the project tempo afterward.",
+  description: "Record existing launcher clips into Bitwig's Arranger across exact requested beat regions, merging contiguous regions. Recording starts at the earliest region and covers at most 1024 beats. Armed tracks are disarmed and overdub is off while it records; tempo, loop, overdub, arms and playhead are restored afterward, also on failure.",
   inputSchema: {
     regions: z.array(z.object({
       ...trackSelector,
