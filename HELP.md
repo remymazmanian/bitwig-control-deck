@@ -132,7 +132,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 
 - **bitwig_clips** — List populated launcher clips for one exact track.
 - **bitwig_clip_notes** — Read every note in one launcher clip (beat, pitch, velocity, duration, channel, muted). Notes are read from Bitwig's step grid, so a note that starts between steps comes back at the step it starts in; the reply says `quantized: true`.
-- **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content.
+- **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content. Every note is then read back from the clip; a missing, changed, muted, or extra note fails the call and names the first five differences.
 - **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions and restoring the project tempo afterward.
 - **bitwig_launch_scene** — Launch one scene immediately and from the start across all tracks.
 - **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification.
