@@ -1116,6 +1116,13 @@ function handleCueMarkers(request) {
    var updated = 0;
    var current = 0;
    var originalTransportPosition = transport.getPosition().get();
+   var movedPlayhead = false;
+   // A new marker at the playhead itself goes last, so it cannot sit under the
+   // playhead while the other new markers are added.
+   normalized.sort(function(left, right) {
+      return Number(Math.abs(left.positionBeats - originalTransportPosition) < 0.0001) -
+         Number(Math.abs(right.positionBeats - originalTransportPosition) < 0.0001);
+   });
    var temporaryPosition = 64;
    var existingMarkers = listCueMarkers().markers;
    for (var existingIndex = 0; existingIndex < existingMarkers.length; existingIndex++) {
@@ -1125,9 +1132,22 @@ function handleCueMarkers(request) {
       temporaryPosition = Math.max(temporaryPosition, normalized[requestedIndex].positionBeats + 64);
    }
 
+   // Bitwig 18 can only add a cue marker at the play position, so new markers
+   // are added where the playhead already is and then moved into place. The
+   // playhead is moved only when the transport is stopped and a marker already
+   // sits under it, and it is put back before the reply.
+   function restorePlayhead() {
+      if (movedPlayhead) transport.setPosition(originalTransportPosition);
+   }
+
+   function fail(error) {
+      restorePlayhead();
+      finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
+   }
+
    function verifyAndFinish() {
-      transport.setPosition(originalTransportPosition);
-      later(220, function() {
+      restorePlayhead();
+      later(movedPlayhead ? 220 : 120, function() {
          try {
             var verified = [];
             var missing = [];
@@ -1161,6 +1181,72 @@ function handleCueMarkers(request) {
       });
    }
 
+   function addAndPlace(expected) {
+      var beforeCounts = cueMarkerFingerprintCounts();
+      var beforeTotal = cueMarkerBank.itemCount().get();
+      transport.addCueMarkerAtPlaybackPosition();
+      var identifyAttempt = 0;
+
+      function identifyInsertedMarker() {
+         try {
+            var afterTotal = cueMarkerBank.itemCount().get();
+            if (afterTotal <= beforeTotal) {
+               if (identifyAttempt++ < 20) {
+                  later(100, identifyInsertedMarker);
+                  return;
+               }
+               throw new Error("Bitwig did not create a new cue marker at the play position.");
+            }
+
+            var afterSeen = {};
+            var inserted = null;
+            var count = Math.min(afterTotal, MAX_CUE_MARKERS);
+            for (var markerIndex = 0; markerIndex < count; markerIndex++) {
+               var marker = cueMarkerBank.getItemAt(markerIndex);
+               if (!marker.exists().get()) continue;
+               var fingerprint = JSON.stringify([marker.name().get(), marker.position().get()]);
+               afterSeen[fingerprint] = Number(afterSeen[fingerprint] || 0) + 1;
+               if (!inserted && afterSeen[fingerprint] > Number(beforeCounts[fingerprint] || 0)) {
+                  inserted = marker;
+               }
+            }
+            if (!inserted) throw new Error("Bitwig created a cue marker but the bridge could not identify it.");
+
+            inserted.name().set(expected.name);
+            inserted.position().setRaw(expected.positionBeats);
+            created++;
+            later(240, processNext);
+         } catch (error) {
+            fail(error);
+         }
+      }
+      later(100, identifyInsertedMarker);
+   }
+
+   function addAtTemporaryPosition(expected) {
+      var insertionPosition = temporaryPosition;
+      temporaryPosition += 4;
+      movedPlayhead = true;
+      transport.setPosition(insertionPosition);
+      var positionAttempt = 0;
+
+      function waitForInsertionPosition() {
+         try {
+            if (Math.abs(transport.getPosition().get() - insertionPosition) >= 0.0001) {
+               if (positionAttempt++ < 20) {
+                  later(100, waitForInsertionPosition);
+                  return;
+               }
+               throw new Error("Bitwig did not verify the temporary cue-marker insertion position.");
+            }
+            addAndPlace(expected);
+         } catch (error) {
+            fail(error);
+         }
+      }
+      later(100, waitForInsertionPosition);
+   }
+
    function processNext() {
       try {
          if (current >= normalized.length) {
@@ -1178,70 +1264,13 @@ function handleCueMarkers(request) {
             return;
          }
 
-         var insertionPosition = temporaryPosition;
-         temporaryPosition += 4;
-         transport.setPosition(insertionPosition);
-         var positionAttempt = 0;
-
-         function waitForInsertionPosition() {
-            try {
-               if (Math.abs(transport.getPosition().get() - insertionPosition) >= 0.0001) {
-                  if (positionAttempt++ < 20) {
-                     later(100, waitForInsertionPosition);
-                     return;
-                  }
-                  throw new Error("Bitwig did not verify the temporary cue-marker insertion position.");
-               }
-
-               var beforeCounts = cueMarkerFingerprintCounts();
-               var beforeTotal = cueMarkerBank.itemCount().get();
-               transport.addCueMarkerAtPlaybackPosition();
-               var identifyAttempt = 0;
-
-               function identifyInsertedMarker() {
-                  try {
-               var afterTotal = cueMarkerBank.itemCount().get();
-               if (afterTotal <= beforeTotal) {
-                  if (identifyAttempt++ < 20) {
-                     later(100, identifyInsertedMarker);
-                     return;
-                  }
-                  throw new Error("Bitwig did not create a new cue marker at the play position.");
-               }
-
-               var afterSeen = {};
-               var inserted = null;
-               var count = Math.min(afterTotal, MAX_CUE_MARKERS);
-               for (var markerIndex = 0; markerIndex < count; markerIndex++) {
-                  var marker = cueMarkerBank.getItemAt(markerIndex);
-                  if (!marker.exists().get()) continue;
-                  var fingerprint = JSON.stringify([marker.name().get(), marker.position().get()]);
-                  afterSeen[fingerprint] = Number(afterSeen[fingerprint] || 0) + 1;
-                  if (!inserted && afterSeen[fingerprint] > Number(beforeCounts[fingerprint] || 0)) {
-                     inserted = marker;
-                  }
-               }
-               if (!inserted) throw new Error("Bitwig created a cue marker but the bridge could not identify it.");
-
-               inserted.name().set(expected.name);
-               inserted.position().setRaw(expected.positionBeats);
-               created++;
-               later(240, processNext);
-                  } catch (error) {
-                     transport.setPosition(originalTransportPosition);
-                     finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
-                  }
-               }
-               later(100, identifyInsertedMarker);
-            } catch (error) {
-               transport.setPosition(originalTransportPosition);
-               finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
-            }
+         if (!transport.isPlaying().get() && cueMarkerAtPosition(transport.getPosition().get())) {
+            addAtTemporaryPosition(expected);
+            return;
          }
-         later(100, waitForInsertionPosition);
+         addAndPlace(expected);
       } catch (error) {
-         transport.setPosition(originalTransportPosition);
-         finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
+         fail(error);
       }
    }
 
