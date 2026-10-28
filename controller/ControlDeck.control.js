@@ -1472,6 +1472,48 @@ function readLauncherNotes(lengthBeats, stepSize, callback) {
    readPage(0);
 }
 
+// Compares a clip's read-back notes with the validated notes that were written
+// and returns one line per difference: missing, changed, or unexpected notes.
+function compareWrittenNotes(validated, stepSize, actual) {
+   var expected = [];
+   for (var i = 0; i < validated.pageStarts.length; i++) {
+      var pageStart = validated.pageStarts[i];
+      var page = validated.pages[String(pageStart)];
+      for (var j = 0; j < page.length; j++) {
+         var note = page[j];
+         expected.push({ step: pageStart + note.x, pitch: note.pitch, velocity: note.velocity, duration: note.duration, channel: note.channel });
+      }
+   }
+   var byCell = {};
+   for (var k = 0; k < actual.length; k++) {
+      var key = actual[k].channel + ":" + Math.round(actual[k].beat / stepSize) + ":" + actual[k].pitch;
+      byCell[key] = actual[k];
+   }
+   var problems = [];
+   for (var m = 0; m < expected.length; m++) {
+      var want = expected[m];
+      var cell = want.channel + ":" + want.step + ":" + want.pitch;
+      var label = "pitch " + want.pitch + " at beat " + (want.step * stepSize) + " (channel " + want.channel + ")";
+      var got = byCell[cell];
+      if (!got || got.used) {
+         problems.push(label + " is missing");
+         continue;
+      }
+      got.used = true;
+      var diffs = [];
+      if (got.velocity !== want.velocity) diffs.push("velocity is " + got.velocity + ", requested " + want.velocity);
+      if (Math.abs(got.duration - want.duration) > 0.001) diffs.push("duration is " + got.duration + ", requested " + want.duration);
+      if (got.muted) diffs.push("note is muted");
+      if (diffs.length) problems.push(label + ": " + diffs.join(", "));
+   }
+   for (var n = 0; n < actual.length; n++) {
+      if (!actual[n].used) {
+         problems.push("unexpected pitch " + actual[n].pitch + " at beat " + actual[n].beat + " (channel " + actual[n].channel + ")");
+      }
+   }
+   return { expectedCount: expected.length, problems: problems };
+}
+
 function handleCreateNoteClip(request) {
    var params = request.params;
    var slotIndex = Number(params.slotIndex);
@@ -1520,12 +1562,28 @@ function handleCreateNoteClip(request) {
                                  try {
                                     var snapshot = clipSnapshot(slot, slotIndex);
                                     if (!snapshot.hasContent) throw new Error("Bitwig did not confirm clip content.");
-                                    finish(request, true, {
-                                       track: { index: params.trackIndex, name: params.trackName },
-                                       clip: snapshot,
-                                       lengthBeats: launcherClip.getLoopLength().get(),
-                                       stepSize: stepSize,
-                                       notesWritten: validated.noteCount
+                                    readLauncherNotes(lengthBeats, stepSize, function(readError, actual) {
+                                       if (readError) {
+                                          finish(request, false, { message: "Could not read the clip back after writing: " + String(readError.message || readError) });
+                                          return;
+                                       }
+                                       var check = compareWrittenNotes(validated, stepSize, actual);
+                                       if (check.problems.length) {
+                                          var shown = check.problems.slice(0, 5).join("; ");
+                                          var more = check.problems.length > 5 ? "; and " + (check.problems.length - 5) + " more" : "";
+                                          finish(request, false, {
+                                             message: "Note verification failed: clip slot " + slotIndex + " does not match the " + check.expectedCount + " requested notes after writing. " + shown + more + "."
+                                          });
+                                          return;
+                                       }
+                                       finish(request, true, {
+                                          track: { index: params.trackIndex, name: params.trackName },
+                                          clip: clipSnapshot(slot, slotIndex),
+                                          lengthBeats: launcherClip.getLoopLength().get(),
+                                          stepSize: stepSize,
+                                          notesWritten: validated.noteCount,
+                                          notesVerified: actual.length
+                                       });
                                     });
                                  } catch (verificationError) {
                                     finish(request, false, { message: String(verificationError.message || verificationError) });
