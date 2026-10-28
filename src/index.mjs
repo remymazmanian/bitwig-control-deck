@@ -237,6 +237,15 @@ server.registerTool("bitwig_clips", {
   inputSchema: trackSelector
 }, async args => call("list_clips", args));
 
+server.registerTool("bitwig_clip_notes", {
+  description: "Read every note in one launcher clip on one exact track, read from Bitwig's step grid. Notes that start between steps come back at the step they start in (quantized: true).",
+  inputSchema: {
+    ...trackSelector,
+    slotIndex: z.number().int().min(0).max(7).default(0),
+    stepSize: z.number().min(0.03125).max(4).default(0.25).describe("Grid resolution in beats used to read note starts")
+  }
+}, async args => call("clip_notes", args, 120000));
+
 server.registerTool("bitwig_launch_scene", {
   description: "Launch one Control Deck scene immediately and from the start across all tracks.",
   inputSchema: { slotIndex: z.number().int().min(0).max(7).default(0) }

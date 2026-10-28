@@ -110,7 +110,7 @@ Remote cloud connectors (claude.ai, ChatGPT) are deliberately unsupported — se
 
 ## MCP tool reference
 
-All 34 tools follow the same contract: **exact targets** (mutations require both index and current name; stale names are refused), **no preset loading** (only Bitwig's Devices browser is used), and **readback verification** (writes report the value Bitwig actually shows afterward).
+All 35 tools follow the same contract: **exact targets** (mutations require both index and current name; stale names are refused), **no preset loading** (only Bitwig's Devices browser is used), and **readback verification** (writes report the value Bitwig actually shows afterward).
 
 ### Status & session
 
@@ -131,6 +131,7 @@ All 34 tools follow the same contract: **exact targets** (mutations require both
 ### Clips & arrangement
 
 - **bitwig_clips** — List populated launcher clips for one exact track.
+- **bitwig_clip_notes** — Read every note in one launcher clip (beat, pitch, velocity, duration, channel, muted). Notes are read from Bitwig's step grid, so a note that starts between steps comes back at the step it starts in; the reply says `quantized: true`.
 - **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content.
 - **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions and restoring the project tempo afterward.
 - **bitwig_launch_scene** — Launch one scene immediately and from the start across all tracks.

@@ -1414,6 +1414,64 @@ function writeClipPages(targetClip, validated, pageIndex, callback) {
    });
 }
 
+// Note-start cells Bitwig reports for the launcher cursor clip's visible grid
+// window, keyed "channel:x:pitch". init() registers onLauncherNoteStep, so the
+// map follows every scroll; reads confirm each cell with getStep() before use.
+var launcherNoteCells = {};
+
+function onLauncherNoteStep(step) {
+   var key = step.channel() + ":" + step.x() + ":" + step.y();
+   if (String(step.state()) === "NoteOn") launcherNoteCells[key] = true;
+   else delete launcherNoteCells[key];
+}
+
+// Reads every note in the launcher cursor clip from beat 0 to lengthBeats.
+// Bitwig only exposes notes through its step grid, so a note that starts
+// between steps comes back at the step it starts in (the result is quantized).
+function readLauncherNotes(lengthBeats, stepSize, callback) {
+   var stepCount = Math.ceil(lengthBeats / stepSize - 0.0001);
+   var notes = [];
+   launcherClip.setStepSize(stepSize);
+   launcherClip.scrollToKey(0);
+
+   function readPage(pageStart) {
+      if (pageStart >= stepCount) {
+         launcherClip.scrollToStep(0);
+         notes.sort(function(a, b) { return a.beat - b.beat || a.pitch - b.pitch || a.channel - b.channel; });
+         callback(null, notes);
+         return;
+      }
+      launcherClip.scrollToStep(pageStart);
+      later(180, function() {
+         try {
+            var keys = Object.keys(launcherNoteCells);
+            for (var i = 0; i < keys.length; i++) {
+               var parts = keys[i].split(":");
+               var channel = Number(parts[0]);
+               var x = Number(parts[1]);
+               var pitch = Number(parts[2]);
+               if (pageStart + x >= stepCount) continue;
+               var step = launcherClip.getStep(channel, x, pitch);
+               if (String(step.state()) !== "NoteOn") continue;
+               notes.push({
+                  beat: Math.round((pageStart + x) * stepSize * 1000000) / 1000000,
+                  pitch: pitch,
+                  velocity: Math.max(1, Math.min(127, Math.round(step.velocity() * 127))),
+                  duration: step.duration(),
+                  channel: channel,
+                  muted: step.isMuted()
+               });
+            }
+            readPage(pageStart + CLIP_GRID_WIDTH);
+         } catch (error) {
+            callback(error);
+         }
+      });
+   }
+
+   readPage(0);
+}
+
 function handleCreateNoteClip(request) {
    var params = request.params;
    var slotIndex = Number(params.slotIndex);
@@ -1495,6 +1553,53 @@ function handleCreateNoteClip(request) {
    });
 }
 
+function handleClipNotes(request) {
+   var params = request.params;
+   var slotIndex = Number(params.slotIndex);
+   var stepSize = Number(params.stepSize || 0.25);
+   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
+      throw new Error("Clip slot must be between 0 and " + (MAX_SCENES - 1) + ".");
+   }
+   if (!(stepSize >= 0.03125 && stepSize <= 4)) throw new Error("Clip step size must be between 1/128 and 4 beats.");
+
+   selectTrack(request, params, function(track) {
+      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
+      if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip.");
+      slot.select();
+      slot.showInEditor();
+      later(240, function() {
+         try {
+            if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
+            var loopStart = launcherClip.getLoopStart().get();
+            var loopLength = launcherClip.getLoopLength().get();
+            var lengthBeats = loopStart + loopLength;
+            if (!(lengthBeats > 0 && lengthBeats <= 512)) {
+               throw new Error("Clips must end within 512 beats to be read; this one ends at beat " + lengthBeats + ".");
+            }
+            readLauncherNotes(lengthBeats, stepSize, function(error, notes) {
+               if (error) {
+                  finish(request, false, { message: String(error.message || error) });
+                  return;
+               }
+               finish(request, true, {
+                  track: { index: params.trackIndex, name: params.trackName },
+                  clip: clipSnapshot(slot, slotIndex),
+                  lengthBeats: lengthBeats,
+                  loopStartBeats: loopStart,
+                  loopLengthBeats: loopLength,
+                  stepSize: stepSize,
+                  quantized: true,
+                  noteCount: notes.length,
+                  notes: notes
+               });
+            });
+         } catch (error) {
+            finish(request, false, { message: String(error.message || error) });
+         }
+      });
+   });
+}
+
 function readLauncherTemplate(track, slotIndex, callback) {
    try {
       var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
@@ -1509,31 +1614,19 @@ function readLauncherTemplate(track, slotIndex, callback) {
             if (!(loopLength > 0 && loopLength <= 64)) {
                throw new Error("Source launcher clips must be between 0 and 64 beats long.");
             }
-            launcherClip.setStepSize(stepSize);
-            launcherClip.scrollToKey(0);
-            launcherClip.scrollToStep(0);
-            later(180, function() {
-               try {
-                  var notes = [];
-                  var stepCount = Math.ceil(loopLength / stepSize);
-                  for (var x = 0; x < stepCount; x++) {
-                     for (var pitch = 0; pitch < 128; pitch++) {
-                        var step = launcherClip.getStep(0, x, pitch);
-                        if (String(step.state()) !== "NoteOn") continue;
-                        notes.push({
-                           beat: x * stepSize,
-                           pitch: pitch,
-                           velocity: Math.max(1, Math.min(127, Math.round(step.velocity() * 127))),
-                           duration: Math.max(stepSize, step.duration()),
-                           channel: 0
-                        });
-                     }
-                  }
-                  if (!notes.length) throw new Error("The source launcher clip contains no readable MIDI notes.");
-                  callback(null, { lengthBeats: loopLength, stepSize: stepSize, notes: notes });
-               } catch (error) {
+            readLauncherNotes(loopLength, stepSize, function(error, read) {
+               if (error) {
                   callback(error);
+                  return;
                }
+               var notes = read.map(function(note) {
+                  return { beat: note.beat, pitch: note.pitch, velocity: note.velocity, duration: Math.max(stepSize, note.duration), channel: note.channel };
+               });
+               if (!notes.length) {
+                  callback(new Error("The source launcher clip contains no readable MIDI notes."));
+                  return;
+               }
+               callback(null, { lengthBeats: loopLength, stepSize: stepSize, notes: notes });
             });
          } catch (error) {
             callback(error);
@@ -2129,6 +2222,9 @@ function dispatch(request) {
       case "create_note_clip":
          handleCreateNoteClip(request);
          return;
+      case "clip_notes":
+         handleClipNotes(request);
+         return;
       case "arrange_launcher_clips":
          handleRecordLauncherArrangement(request);
          return;
@@ -2511,6 +2607,7 @@ function init() {
    deviceBank = cursorTrack.createDeviceBank(MAX_DEVICES);
    launcherClip = host.createLauncherCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
    arrangerClip = host.createArrangerCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
+   launcherClip.addNoteStepObserver(onLauncherNoteStep);
 
    interested(application.projectName());
    interested(arranger.areCueMarkersVisible());
