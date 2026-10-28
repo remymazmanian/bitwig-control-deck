@@ -4,6 +4,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Launcher tools are no longer limited to the first eight scenes. `bitwig_create_note_clip`, `bitwig_clip_notes` and `bitwig_launch_scene` accept slots up to 1023 and scroll Bitwig's scene window to reach them, and `bitwig_clips` lists clips in every scene.
+- `bitwig_create_note_clip` can add a clip one slot past the last scene; Bitwig creates the scene for it.
+
 ## [1.1.0] - 2026-10-28
 
 Adds note read-back for launcher clips and checks every note clip write against what Bitwig reports. Tested in Bitwig Studio 6.1.3 with 16- and 128-beat clips, grids down to 1/128 notes, and notes on several MIDI channels.
