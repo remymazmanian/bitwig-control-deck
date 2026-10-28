@@ -65,7 +65,7 @@ async function bridgeSnapshot() {
 async function snapshot() {
   const [bridge, index] = await Promise.all([bridgeSnapshot(), readPluginIndex()]);
   return {
-    service: { state: "online", name: "Control Deck Local Service", version: "1.0.2", localOnly: true, installPath: INSTALL_PATH },
+    service: { state: "online", name: "Control Deck Local Service", version: "1.1.0", localOnly: true, installPath: INSTALL_PATH },
     bridge,
     library: {
       generatedAt: index.generatedAt,
