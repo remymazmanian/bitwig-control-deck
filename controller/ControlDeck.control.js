@@ -1533,7 +1533,16 @@ function withSceneSlot(request, track, slotIndex, callback) {
    if (slotIndex >= sceneCount) {
       throw new Error("Slot " + slotIndex + " does not exist. The project has " + sceneCount + " scenes, so slots run from 0 to " + (sceneCount - 1) + ".");
    }
-   request.cleanup = resetSceneWindow;
+   // Run after any cleanup the request already has, such as putting the
+   // selection back, and only add it once per request.
+   if (!request.sceneWindowCleanup) {
+      request.sceneWindowCleanup = true;
+      var previousCleanup = request.cleanup;
+      request.cleanup = function() {
+         resetSceneWindow();
+         if (previousCleanup) previousCleanup();
+      };
+   }
    var target = Math.floor(slotIndex / MAX_SCENES) * MAX_SCENES;
    var attempts = 0;
    function showSlot() {

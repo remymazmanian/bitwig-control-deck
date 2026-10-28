@@ -156,3 +156,18 @@ test("the launcher print waits until the scene window is back on the first scene
   assert.match(responses[0].payload.message, /still scrolled/);
   assert.equal(state.position, 0);
 });
+
+test("the scene window reset keeps a cleanup the request already had", () => {
+  const { context, responses, advance, state } = setup({ sceneCount: 20 });
+  const order = [];
+  context.selectTrack = (request, params, callback) => {
+    request.cleanup = () => order.push("selection");
+    callback(context.requireTrack());
+  };
+  context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 12 }, 5000);
+  advance(2000);
+  assert.ok(responses.length === 1);
+  assert.deepEqual(order, ["selection"]);
+  advance(100);
+  assert.equal(state.position, 0);
+});
