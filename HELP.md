@@ -187,7 +187,7 @@ Ports (all loopback-only): `50701/udp` bridge, `50702/tcp` status API, `50703/tc
 
 **The deck says "waiting for Bitwig."** Bitwig isn't open, or the controller isn't active. In Bitwig: Settings → Controllers → confirm "Control Deck Bridge" exists and is enabled. If it's missing, add it manually (vendor "Control Deck") or run setup again and restart Bitwig.
 
-**"Control Deck authentication failed."** The controller script and your services disagree about the secret — usually a controller installed before the current `data/bridge-token`. Run setup again (it re-stamps the controller), then restart Bitwig.
+**Requests time out even though Control Deck Bridge is enabled.** The controller script and your services may disagree about the secret, usually because the controller was installed before the current `data/bridge-token`. The bridge ignores requests with the wrong secret without replying, shows a popup in Bitwig the first time, and logs the count. Run setup again (it re-stamps the controller), then restart Bitwig.
 
 **The controller refuses to start and mentions a missing token.** The repo copy of the controller was installed by hand instead of through setup, so the secret placeholder was never stamped. Run setup; never copy `controller/ControlDeck.control.js` into Bitwig manually.
 

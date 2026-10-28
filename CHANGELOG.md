@@ -4,6 +4,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- The bridge no longer replies to requests with the wrong auth token, including from its error path. It shows a popup the first time and logs the 1st and every 100th ignored request.
+
 ## [1.1.0] - 2026-10-28
 
 Adds note read-back for launcher clips and checks every note clip write against what Bitwig reports. Tested in Bitwig Studio 6.1.3 with 16- and 128-beat clips, grids down to 1/128 notes, and notes on several MIDI channels.
