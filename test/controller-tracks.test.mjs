@@ -109,3 +109,50 @@ test("create_track fails when no new track shows up", () => {
   assert.equal(responses[0].ok, false);
   assert.match(responses[0].payload.message, /did not show exactly one new track/);
 });
+
+test("delete_track succeeds only once the track is gone and the rest kept their order", () => {
+  const { context, responses, advance } = setup({ tracks: ["Drums", "Bass", "Keys"] });
+  context.enqueue(5000, "1", "delete_track", { trackIndex: 1, trackName: "Bass" }, 5000);
+  advance(3000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.equal(responses[0].payload.removedCount, 1);
+  assert.equal(responses[0].payload.verifiedCount, 2);
+});
+
+test("delete_track reports a group's contents going with it", () => {
+  const { context, responses, advance } = setup({ tracks: ["Drums", "Group", "Kick", "Snare", "Keys"], groupSize: 3 });
+  context.enqueue(5000, "1", "delete_track", { trackIndex: 1, trackName: "Group" }, 5000);
+  advance(3000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.equal(responses[0].payload.removedCount, 3);
+  assert.match(responses[0].payload.note, /group/);
+});
+
+test("delete_track fails when Bitwig keeps the track", () => {
+  const { context, responses, advance } = setup();
+  context.trackBank.getItemAt = (original => index => ({ ...original(index), deleteObject: () => {} }))(context.trackBank.getItemAt);
+  context.enqueue(5000, "1", "delete_track", { trackIndex: 0, trackName: "Drums" }, 5000);
+  advance(5000);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /did not confirm that the track ‘Drums’ was removed/);
+});
+
+test("delete_device fails when a different device disappears", () => {
+  const { context, responses, advance } = setup();
+  context.deviceBank.getItemAt = (original => index => ({
+    ...original(index),
+    deleteObject: () => context.host.scheduleTask(() => context.deviceBank.items.splice(2, 1), 30)
+  }))(context.deviceBank.getItemAt);
+  context.enqueue(5000, "1", "delete_device", { trackIndex: 0, trackName: "Drums", deviceIndex: 1, deviceName: "Compressor" }, 5000);
+  advance(5000);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /device ‘Compressor’/);
+});
+
+test("delete_device verifies the device is gone", () => {
+  const { context, responses, advance } = setup();
+  context.enqueue(5000, "1", "delete_device", { trackIndex: 0, trackName: "Drums", deviceIndex: 1, deviceName: "Compressor" }, 5000);
+  advance(3000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.deepEqual(names(context.deviceBank), ["EQ+", "Delay+"]);
+});

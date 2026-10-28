@@ -1276,6 +1276,20 @@ function insertedIndex(before, after) {
    return prefix + suffix === before.length ? prefix : null;
 }
 
+// Where the bank lost `removed` items starting at `index` and everything else
+// kept its order, returns true. Only the names the bank shows are compared, so
+// this also works when the project has more items than the bank can reach.
+function isRemovedRun(before, after, index, removed) {
+   if (removed < 1 || index + removed > before.length) return false;
+   for (var i = 0; i < index; i++) {
+      if (before[i] !== after[i]) return false;
+   }
+   for (var j = index; j < after.length && j + removed < before.length; j++) {
+      if (before[j + removed] !== after[j]) return false;
+   }
+   return true;
+}
+
 function handleCreateTrack(request) {
    var params = request.params;
    var effect = params.kind === "effect";
@@ -1342,6 +1356,39 @@ function handleCreateTrack(request) {
       later(140, verifyName);
    }
    later(200, locate);
+}
+
+// Deletes one track or device and checks Bitwig's list afterwards: the item
+// must be gone and everything else must still be in the same order.
+function deleteAndVerify(request, bank, limit, index, item, deleted, what) {
+   var before = bankNames(bank, limit);
+   var totalBefore = bank.itemCount().get();
+   item.deleteObject();
+   var attempt = 0;
+   function verify() {
+      try {
+         var after = bankNames(bank, limit);
+         var removed = totalBefore - bank.itemCount().get();
+         if (!isRemovedRun(before, after, index, removed)) {
+            if (attempt++ < 20) {
+               later(100, verify);
+               return;
+            }
+            finish(request, false, {
+               message: "Bitwig did not confirm that the " + what + " ‘" + deleted.name + "’ was removed and the rest left in place. Check it in Bitwig.",
+               previousCount: totalBefore,
+               verifiedCount: bank.itemCount().get()
+            });
+            return;
+         }
+         var payload = { deleted: deleted, previousCount: totalBefore, verifiedCount: totalBefore - removed, removedCount: removed };
+         if (removed > 1) payload.note = "Bitwig removed " + removed + " " + what + "s; a group takes its contents with it.";
+         finish(request, true, payload);
+      } catch (error) {
+         finish(request, false, { message: String(error.message || error) });
+      }
+   }
+   later(250, verify);
 }
 
 function markSlot(slot) {
@@ -2326,12 +2373,7 @@ function dispatch(request) {
          return;
       case "delete_track":
          var track = requireTrack(params);
-         var deletedTrack = trackSnapshot(track, Number(params.trackIndex));
-         var trackCountBefore = trackBank.itemCount().get();
-         track.deleteObject();
-         later(250, function() {
-            finish(request, true, { deleted: deletedTrack, verifiedCount: trackBank.itemCount().get(), previousCount: trackCountBefore });
-         });
+         deleteAndVerify(request, trackBank, MAX_TRACKS, Number(params.trackIndex), track, trackSnapshot(track, Number(params.trackIndex)), "track");
          return;
       case "list_devices":
          selectTrack(request, params, function() {
@@ -2386,12 +2428,7 @@ function dispatch(request) {
          selectTrack(request, params, function() {
             try {
                var device = requireDevice(params);
-               var deleted = deviceSnapshot(device, Number(params.deviceIndex));
-               var before = deviceBank.itemCount().get();
-               device.deleteObject();
-               later(250, function() {
-                  finish(request, true, { deleted: deleted, previousCount: before, verifiedCount: deviceBank.itemCount().get() });
-               });
+               deleteAndVerify(request, deviceBank, MAX_DEVICES, Number(params.deviceIndex), device, deviceSnapshot(device, Number(params.deviceIndex)), "device");
             } catch (error) {
                finish(request, false, { message: String(error.message || error) });
             }
