@@ -1841,6 +1841,9 @@ function handleRecordLauncherArrangement(request) {
             complete();
             return;
          }
+         if (!transport.isPlaying().get()) {
+            throw new Error("Bitwig's transport stopped at beat " + positionBeats + " before the print reached beat " + endBeats + ".");
+         }
          if (Date.now() - startTimestamp > 115000) {
             throw new Error("Timed out while recording Launcher clips into the Arranger.");
          }

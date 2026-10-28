@@ -151,6 +151,18 @@ test("a print the watchdog gives up on is still put back and launches nothing mo
   expectRestored(state);
 });
 
+test("stopping the transport mid-print fails at once and puts everything back", () => {
+  const { context, responses, advance, state } = setup();
+  context.enqueue(5000, "1", "arrange_launcher_clips", { regions: [region(1, 0, 400)] }, 120000);
+  advance(5000);
+  context.transport.stop();
+  advance(100);
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /transport stopped at beat/);
+  expectRestored(state);
+});
+
 test("a cleanup that throws is logged and the reply still goes out", () => {
   const { context, host, responses } = setup();
   const errors = [];
