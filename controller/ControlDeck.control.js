@@ -253,7 +253,35 @@ function listTracks() {
       var track = trackBank.getItemAt(i);
       if (track.exists().get()) tracks.push(trackSnapshot(track, i));
    }
-   return { total: total, returned: tracks.length, truncated: total > MAX_TRACKS, tracks: tracks };
+   var result = { total: total, returned: tracks.length, truncated: total > MAX_TRACKS, tracks: tracks };
+   var duplicates = duplicateTrackNames(tracks);
+   if (duplicates.length) {
+      result.duplicateNames = duplicates;
+      result.note = "Tools refuse tracks that share a name. Rename them with bitwig_rename_track first.";
+   }
+   return result;
+}
+
+function duplicateTrackNames(tracks) {
+   var seen = {};
+   var duplicates = [];
+   for (var i = 0; i < tracks.length; i++) {
+      var key = "=" + tracks[i].name;
+      seen[key] = Number(seen[key] || 0) + 1;
+      if (seen[key] === 2) duplicates.push(tracks[i].name);
+   }
+   return duplicates;
+}
+
+// Indices of the reachable tracks with exactly this name.
+function trackIndicesNamed(name) {
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   var indices = [];
+   for (var i = 0; i < count; i++) {
+      var track = trackBank.getItemAt(i);
+      if (track.exists().get() && track.name().get() === name) indices.push(i);
+   }
+   return indices;
 }
 
 function readTrackMeters(resetAfterRead) {
@@ -274,7 +302,11 @@ function readTrackMeters(resetAfterRead) {
    return { range: 128, meters: meters };
 }
 
-function requireTrack(params) {
+// API 18 has no stable track IDs (Channel.channelId arrives in API 20), so a track is
+// identified by index plus name. When two tracks share the name, a shifted
+// index could land on the wrong one and still pass, so such tracks are refused
+// unless the caller is renaming one of them.
+function requireTrack(params, allowDuplicateName) {
    var index = Number(params.trackIndex);
    if (index < 0 || index >= MAX_TRACKS || index >= trackBank.itemCount().get()) {
       throw new Error("Track index " + index + " is not available. Refresh with bitwig_tracks.");
@@ -284,6 +316,13 @@ function requireTrack(params) {
    var currentName = track.name().get();
    if (currentName !== String(params.trackName)) {
       throw new Error("Safety check failed: track " + index + " is now named ‘" + currentName + "’, not ‘" + params.trackName + "’. Refresh first.");
+   }
+   if (!allowDuplicateName) {
+      var sameName = trackIndicesNamed(currentName);
+      if (sameName.length > 1) {
+         throw new Error("Tracks " + sameName.join(", ") + " are all named ‘" + currentName + "’, so Control Deck cannot be sure which one is meant. " +
+            "Rename them with bitwig_rename_track so each name is unique, then try again.");
+      }
    }
    return track;
 }
@@ -1339,10 +1378,16 @@ function handleSetTrackMix(request) {
 
 function handleRenameTrack(request) {
    var params = request.params;
-   var track = requireTrack(params);
+   var track = requireTrack(params, true);
    var oldName = track.name().get();
    var newName = String(params.newName || "").trim();
    if (!newName || newName.length > 120) throw new Error("New track name must contain 1 to 120 characters.");
+   var taken = trackIndicesNamed(newName);
+   for (var takenIndex = 0; takenIndex < taken.length; takenIndex++) {
+      if (taken[takenIndex] !== Number(params.trackIndex)) {
+         throw new Error("Track " + taken[takenIndex] + " is already named ‘" + newName + "’. Pick a unique name so tools can tell the tracks apart.");
+      }
+   }
    track.setName(newName);
    later(120, function() {
       try {

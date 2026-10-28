@@ -195,6 +195,8 @@ Ports (all loopback-only): `50701/udp` bridge, `50702/tcp` status API, `50703/tc
 
 **Everything broke after moving or renaming the folder.** Expected — services pin absolute paths. Run setup from the new location (it detects the move and refreshes), and re-register the MCP server in your agent since its path changed too.
 
+**A tool says several tracks "are all named" the same.** Bitwig's controller API version 18 gives tracks no permanent ID, so Control Deck finds a track by its position and checks its name. When two tracks share a name, that check can't catch a track that moved, so tools refuse them. `bitwig_tracks` lists the clashing names under `duplicateNames`. Give each track a unique name, in Bitwig or with `bitwig_rename_track`, which still works on duplicates and refuses a name another track already has.
+
 **Everything broke after upgrading Node.** The launch agents pin the Node binary that ran setup. Re-run setup with the new Node and they're re-pinned.
 
 **"MIDI helper skipped" during setup.** Apple's command line tools are missing. Run `xcode-select --install`, accept the popup, run setup again. Or skip it forever and add the controller in Bitwig manually — the helper is only for auto-detection.

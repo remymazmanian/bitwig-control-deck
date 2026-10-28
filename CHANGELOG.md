@@ -4,6 +4,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Tools identified a track by its index and checked its name, but two tracks with the same name could pass that check after the tracks moved. Track tools now refuse a track whose name another track shares and ask for a rename. `bitwig_rename_track` still works on duplicates, refuses a name that another track already has, and `bitwig_tracks` reports clashing names under `duplicateNames`. Permanent track IDs need controller API 20 and are planned for a later version.
+
 ## [1.1.0] - 2026-10-28
 
 Adds note read-back for launcher clips and checks every note clip write against what Bitwig reports. Tested in Bitwig Studio 6.1.3 with 16- and 128-beat clips, grids down to 1/128 notes, and notes on several MIDI channels.
