@@ -123,7 +123,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 ### Tracks
 
 - **bitwig_tracks** — List tracks with exact names, positions, safety references, types, and states.
-- **bitwig_create_track** — Create an empty track without opening the Browser or loading any preset.
+- **bitwig_create_track** — Create an empty track without opening the Browser or loading any preset. The bridge finds the track Bitwig added by comparing the track list before and after, then names it and checks the name. Effect tracks are reported with their `effectTrackIndex` in the effect track list. With 128 main tracks (or 32 effect tracks) it refuses before creating anything.
 - **bitwig_set_track_mix** — Set exact mixer values on one verified track and read the resulting state back.
 - **bitwig_rename_track** — Rename one verified track without changing its routing.
 - **bitwig_delete_track** — Delete one exact track; the supplied name must still match, preventing index-drift mistakes.
