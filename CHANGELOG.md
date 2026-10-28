@@ -4,6 +4,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- A reply too large for one message could silently never arrive, and the client only saw a timeout. The bridge now checks every reply against a 60,000-byte limit (the same limit the client uses for requests) and sends a clear error instead. If Bitwig cannot send a reply at all, the bridge logs it as an error and tries to tell the client with a short error reply.
+
 ## [1.1.0] - 2026-10-28
 
 Adds note read-back for launcher clips and checks every note clip write against what Bitwig reports. Tested in Bitwig Studio 6.1.3 with 16- and 128-beat clips, grids down to 1/128 notes, and notes on several MIDI channels.
