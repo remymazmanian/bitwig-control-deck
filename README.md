@@ -33,6 +33,7 @@ Everything runs on your machine and binds only to loopback addresses. Nothing is
 
 - Status and transport
 - List, create, position, and rename Arranger cue markers with readback verification
+- Read every note in a launcher clip from Bitwig's step grid
 - Build Arranger MIDI clips from existing launcher patterns at exact beat positions
 - List, create, and safely delete tracks
 - List and safely delete devices
