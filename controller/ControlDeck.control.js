@@ -1009,27 +1009,56 @@ function handleNestDevice(request) {
    });
 }
 
+// Bitwig's API can open the Save to Library dialog but can't see it or type
+// into it. Enter goes to whatever has keyboard focus, so it is only pressed
+// when the caller asks for it (confirm: true) and the same device is still
+// selected on the same track right before the key press.
 function handleSaveDevicePreset(request) {
    var params = request.params;
+   if (!saveToLibraryAction) throw new Error("This Bitwig version has no Save to Library action, so the preset can't be saved from Control Deck.");
    selectDevice(request, params, function(device) {
       try {
          var presetName = String(params.presetName || "").trim();
+         var confirm = params.confirm === true;
+         var trackName = cursorTrack.name().get();
+         var deviceName = device.name().get();
+         var devicePosition = device.position().get();
+         var presetNameBefore = device.presetName().get();
          device.selectInEditor();
          later(180, function() {
             try {
                saveToLibraryAction.invoke();
                later(700, function() {
-                  if (params.confirm !== false) application.enter();
-                  later(450, function() {
-                     finish(request, true, {
-                        device: deviceSnapshot(device, Number(params.deviceIndex)),
-                        requestedPresetName: presetName,
-                        saveToLibraryOpened: true,
-                        confirmationSent: params.confirm !== false,
-                        nameEntryRequired: params.confirm === false && !!presetName,
-                        suggestedPresetName: presetName || null
+                  try {
+                     if (confirm) {
+                        var stillSelected = cursorTrack.name().get() === trackName &&
+                           cursorDevice.exists().get() &&
+                           cursorDevice.name().get() === deviceName &&
+                           cursorDevice.position().get() === devicePosition;
+                        if (!stillSelected) {
+                           throw new Error("The selection changed while Bitwig's Save to Library dialog was opening, so Enter was not pressed. Check Bitwig and close the dialog if it is open.");
+                        }
+                        application.enter();
+                     }
+                     later(450, function() {
+                        var presetNameAfter = device.presetName().get();
+                        finish(request, true, {
+                           device: deviceSnapshot(device, Number(params.deviceIndex)),
+                           requestedPresetName: presetName,
+                           saveToLibraryOpened: true,
+                           confirmationSent: confirm,
+                           presetNameBefore: presetNameBefore,
+                           presetNameAfter: presetNameAfter,
+                           note: confirm
+                              ? "Bitwig doesn't report whether the dialog saved. A changed presetNameAfter is a good sign; check the Library to be sure."
+                              : "The dialog is open in Bitwig. Type the name and press Save there.",
+                           nameEntryRequired: !confirm && !!presetName,
+                           suggestedPresetName: presetName || null
+                        });
                      });
-                  });
+                  } catch (error) {
+                     finish(request, false, { message: String(error.message || error) });
+                  }
                });
             } catch (error) {
                finish(request, false, { message: String(error.message || error) });

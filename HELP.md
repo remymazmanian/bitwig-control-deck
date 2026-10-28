@@ -145,7 +145,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 - **bitwig_insert_stock_device** — Insert a stock Bitwig device by its stable UUID, optionally before a verified device — including note-processing positions the end-of-chain Browser omits.
 - **bitwig_insert_clap_device** — Insert a CLAP plug-in directly by its stable ID, bypassing Browser filters and redundant-format hiding.
 - **bitwig_nest_device** — Move one verified top-level device into another device's native nested chain and verify both chains.
-- **bitwig_save_device_preset** — Open Bitwig's native Save-to-Library flow for one verified device, without mouse automation.
+- **bitwig_save_device_preset** — Open Bitwig's native Save-to-Library dialog for one verified device, without mouse automation. Bitwig's API can't type the name, so the dialog stays open for you to name and save. With `confirm: true`, Control Deck presses Enter to accept the prefilled name, and only when the same device is still selected.
 - **bitwig_delete_device** — Delete one exact device; both track and device names must still match.
 - **bitwig_open_device_window** — Open the native window for one exact device or plug-in.
 
