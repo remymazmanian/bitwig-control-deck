@@ -118,7 +118,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 - **bitwig_actions** — Search Bitwig Studio's native action registry by action id, name, or menu text.
 - **bitwig_invoke_action** — Invoke one exact Bitwig action id previously returned by `bitwig_actions`.
 - **bitwig_transport** — Read or control Bitwig transport. Tempo changes are read back before success is reported.
-- **bitwig_track_meters** — Read peak signal activity captured for every track, or reset the captured maxima before a playback test.
+- **bitwig_track_meters** — Read peak signal activity captured for every track, or reset the captured maxima before a playback test. When tracks are added, deleted or moved, a track that lands on a new position starts a fresh maximum instead of inheriting the previous track's peak.
 
 ### Tracks
 

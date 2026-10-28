@@ -62,6 +62,9 @@ var copyLauncherToArrangerAction;
 var jumpToBeginningAction;
 var trackMeterLatest = [];
 var trackMeterMaximum = [];
+// Name of the track each maximum was measured on. Maxima are stored by bank
+// position, so a track that moves to another position must not inherit them.
+var trackMeterOwner = [];
 var requestQueue = [];
 var requestBusy = false;
 var currentRequest = null;
@@ -262,12 +265,13 @@ function readTrackMeters(resetAfterRead) {
    for (var i = 0; i < total; i++) {
       var track = trackBank.getItemAt(i);
       if (!track.exists().get()) continue;
+      var maximum = meterMaximumFor(i, track.name().get());
       meters.push({
          index: i,
          name: track.name().get(),
          latest: Number(trackMeterLatest[i] || 0),
-         maximum: Number(trackMeterMaximum[i] || 0),
-         maximumNormalized: Number(trackMeterMaximum[i] || 0) / 127
+         maximum: maximum,
+         maximumNormalized: maximum / 127
       });
       if (resetAfterRead) trackMeterMaximum[i] = Number(trackMeterLatest[i] || 0);
    }
@@ -2620,8 +2624,23 @@ function observeTrackMeter(track, index) {
    track.addVuMeterObserver(128, -1, true, function(value) {
       var numeric = Number(value || 0);
       trackMeterLatest[index] = numeric;
-      if (numeric > Number(trackMeterMaximum[index] || 0)) trackMeterMaximum[index] = numeric;
+      var name = track.name().get();
+      if (trackMeterOwner[index] !== name) {
+         trackMeterOwner[index] = name;
+         trackMeterMaximum[index] = numeric;
+      } else if (numeric > Number(trackMeterMaximum[index] || 0)) trackMeterMaximum[index] = numeric;
    });
+}
+
+// The maximum only counts when it was measured on the track that sits at this
+// position now. After tracks are added, deleted or moved, it starts again from
+// the latest level.
+function meterMaximumFor(index, name) {
+   if (trackMeterOwner[index] !== name) {
+      trackMeterOwner[index] = name;
+      trackMeterMaximum[index] = Number(trackMeterLatest[index] || 0);
+   }
+   return Number(trackMeterMaximum[index] || 0);
 }
 
 function markDevice(device) {
