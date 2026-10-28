@@ -201,6 +201,8 @@ Ports (all loopback-only): `50701/udp` bridge, `50702/tcp` status API, `50703/tc
 
 **Save to Library opened, but nothing was saved.** Bitwig's API can open the dialog but can't type into it, so `bitwig_save_device_preset` leaves the dialog open for you to name and save. With `confirm: true` it presses Enter to accept the prefilled name, and only when the same device is still selected. Compare `presetNameBefore` and `presetNameAfter` in the reply, then check the Library.
 
+**The selected track flickers while a tool runs.** Device, sample and clip tools work through Bitwig's selection, so they select their track for a moment. When the tool finishes, Control Deck selects your track again, and your device too when the tool worked on that same track. Selection is left alone when your track moved or was deleted, and when you had the master, an effect track or a track past the first 128 selected. `bitwig_create_track` still leaves the new track selected.
+
 **macOS refuses to open the installer.** Downloaded, non-notarized scripts need a one-time right-click → **Open**. Everything after that first launch is normal.
 
 **Plug-in list is empty or stale.** Use the reindex button on the deck, or `npm run index:plugins`.

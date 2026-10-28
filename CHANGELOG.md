@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Device, sample and clip tools selected their track (and device) in Bitwig and left it that way, so your selection moved every time an agent worked. The selection you had now comes back when the tool finishes, whether it succeeded or failed.
 - `bitwig_save_device_preset` pressed Enter by default about a second after opening Save to Library, whether or not the dialog had appeared, so the key could land somewhere else in Bitwig. The dialog now stays open by default. With `confirm: true`, Enter is pressed only if the same device is still selected, and the reply shows the device's preset name before and after.
 - `bitwig_track_meters` kept peak maxima by track position, so after tracks were added, deleted or moved, a track could report another track's peak. A maximum now belongs to the track it was measured on and starts again when a different track takes that position.
 

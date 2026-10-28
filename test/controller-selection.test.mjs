@@ -109,3 +109,84 @@ test("save_device_preset explains a missing Save to Library action", () => {
   assert.equal(responses[0].ok, false);
   assert.match(responses[0].payload.message, /no Save to Library action/);
 });
+
+function selectionSetup() {
+  const loaded = loadController();
+  const { context } = loaded;
+  const tracks = [
+    { name: "Drums", devices: ["Drum Machine", "EQ+"], selectedDevice: 1 },
+    { name: "Lead", devices: ["Polymer", "Delay+"], selectedDevice: 0 }
+  ];
+  const state = { track: 0 };
+  const current = () => tracks[state.track];
+  const deviceItem = index => ({
+    name: () => value(() => current().devices[index]),
+    index
+  });
+  context.trackBank = {
+    itemCount: () => value(() => tracks.length),
+    getItemAt: index => ({
+      exists: () => value(() => Boolean(tracks[index])),
+      name: () => value(() => tracks[index].name),
+      selectInMixer: () => { state.track = index; }
+    })
+  };
+  context.trackIsCursor = tracks.map((track, index) => value(() => state.track === index));
+  context.cursorTrack = { name: () => value(() => current().name) };
+  context.cursorDevice = {
+    exists: () => value(() => current().selectedDevice >= 0),
+    isNested: () => value(() => false),
+    name: () => value(() => current().devices[current().selectedDevice]),
+    position: () => value(() => current().selectedDevice),
+    selectDevice: item => { current().selectedDevice = item.index; }
+  };
+  context.deviceBank = {
+    itemCount: () => value(() => current().devices.length),
+    getItemAt: deviceItem
+  };
+  const request = { id: "1", source: 0, done: false };
+  return { ...loaded, tracks, state, request };
+}
+
+test("the selected track comes back after a tool selected another one", () => {
+  const { context, advance, state, request } = selectionSetup();
+  let reached = false;
+  context.selectTrack(request, { trackIndex: 1, trackName: "Lead" }, () => { reached = true; });
+  advance(200);
+  assert.equal(reached, true);
+  assert.equal(state.track, 1);
+  context.finish(request, true, {});
+  assert.equal(state.track, 0);
+});
+
+test("the selected device comes back on the same track, following it by name", () => {
+  const { context, advance, tracks, request } = selectionSetup();
+  context.selectTrack(request, { trackIndex: 0, trackName: "Drums" }, () => {
+    tracks[0].devices.unshift("Note FX");   // a device inserted in front
+    tracks[0].selectedDevice = 0;
+  });
+  advance(200);
+  context.finish(request, false, { message: "failed" });
+  assert.equal(tracks[0].selectedDevice, 2);
+  assert.equal(tracks[0].devices[2], "EQ+");
+});
+
+test("nothing is reselected when the original track is gone", () => {
+  const { context, advance, tracks, state, request } = selectionSetup();
+  context.selectTrack(request, { trackIndex: 1, trackName: "Lead" }, () => {});
+  advance(200);
+  tracks[0].name = "Renamed";
+  context.finish(request, true, {});
+  assert.equal(state.track, 1);
+});
+
+test("an earlier cleanup still runs when the selection is restored", () => {
+  const { context, advance, state, request } = selectionSetup();
+  const order = [];
+  request.cleanup = () => order.push("earlier");
+  context.selectTrack(request, { trackIndex: 1, trackName: "Lead" }, () => {});
+  advance(200);
+  context.finish(request, true, {});
+  assert.deepEqual(order, ["earlier"]);
+  assert.equal(state.track, 0);
+});

@@ -296,6 +296,7 @@ function selectTrack(request, params, callback) {
    var track = requireTrack(params);
    var index = Number(params.trackIndex);
    var expectedName = track.name().get();
+   rememberSelection(request);
    track.selectInMixer();
    later(140, function() {
       try {
@@ -310,6 +311,56 @@ function selectTrack(request, params, callback) {
          finish(request, false, { message: String(error.message || error) });
       }
    });
+}
+
+// Tools that work through Bitwig's cursor move the track (and device) selection.
+// The first time a request does that, note what was selected, and put it back
+// when the request ends, whether it succeeded or failed.
+function rememberSelection(request) {
+   if (request.selectionRemembered) return;
+   request.selectionRemembered = true;
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   var saved = null;
+   for (var i = 0; i < count; i++) {
+      if (trackIsCursor[i].get()) {
+         saved = { trackIndex: i, trackName: trackBank.getItemAt(i).name().get(), deviceName: null, devicePosition: -1 };
+         break;
+      }
+   }
+   // Master, effect tracks and tracks past the first 128 can't be selected again
+   // from the main track list, so their selection is left where the tool put it.
+   if (!saved) return;
+   if (cursorDevice.exists().get() && !cursorDevice.isNested().get()) {
+      saved.deviceName = cursorDevice.name().get();
+      saved.devicePosition = cursorDevice.position().get();
+   }
+   var previousCleanup = request.cleanup;
+   request.cleanup = function() {
+      if (previousCleanup) previousCleanup();
+      restoreSelection(saved);
+   };
+}
+
+function restoreSelection(saved) {
+   var track = trackBank.getItemAt(saved.trackIndex);
+   // The track moved or was deleted by the tool: there is nothing safe to go back to.
+   if (!track.exists().get() || track.name().get() !== saved.trackName) return;
+   if (!trackIsCursor[saved.trackIndex].get()) {
+      track.selectInMixer();
+      return;
+   }
+   // Same track: put the device selection back, following the device by name
+   // when the tool inserted or removed devices in front of it.
+   if (saved.deviceName === null) return;
+   if (cursorDevice.exists().get() && cursorDevice.name().get() === saved.deviceName &&
+      cursorDevice.position().get() === saved.devicePosition) return;
+   var count = Math.min(deviceBank.itemCount().get(), MAX_DEVICES);
+   var best = -1;
+   for (var d = 0; d < count; d++) {
+      if (deviceBank.getItemAt(d).name().get() !== saved.deviceName) continue;
+      if (best < 0 || Math.abs(d - saved.devicePosition) < Math.abs(best - saved.devicePosition)) best = d;
+   }
+   if (best >= 0) cursorDevice.selectDevice(deviceBank.getItemAt(best));
 }
 
 function deviceSnapshot(device, index) {
@@ -456,6 +507,13 @@ function respond(replyPort, id, ok, payload) {
 // failed or timed out are ignored, so they can't release the next request early.
 function finish(request, ok, payload) {
    if (request.done) return;
+   if (request.cleanup) {
+      try {
+         request.cleanup();
+      } catch (error) {
+         host.errorln("Control Deck cleanup error: " + error);
+      }
+   }
    request.done = true;
    respond(request.source, request.id, ok, payload);
    if (currentRequest === request) {
