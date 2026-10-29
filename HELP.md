@@ -140,13 +140,18 @@ args = ["/path/to/bitwig-control-deck/src/index.mjs"]
 grok mcp add bitwig -- node /path/to/bitwig-control-deck/src/index.mjs
 ```
 
-**GitHub Copilot in VS Code** — adds it to your VS Code profile:
+**GitHub Copilot in VS Code** — run **MCP: Add Server** from the Command Palette, choose **Command (stdio)**, enter `node /path/to/bitwig-control-deck/src/index.mjs`, name it `bitwig`, then pick **Global** → **Copilot Global**. That writes `~/.copilot/mcp-config.json`, which you can also edit directly:
 
-```sh
-code --add-mcp '{"name":"bitwig","type":"stdio","command":"node","args":["/path/to/bitwig-control-deck/src/index.mjs"]}'
+```json
+{
+  "mcpServers": {
+    "bitwig": {
+      "command": "node",
+      "args": ["/path/to/bitwig-control-deck/src/index.mjs"]
+    }
+  }
+}
 ```
-
-Or run **MCP: Add Server** from the Command Palette, choose **Command (stdio)** and enter `node /path/to/bitwig-control-deck/src/index.mjs`.
 
 **Claude Desktop, Cursor, Windsurf and Cline** use the standard `mcpServers` block:
 
