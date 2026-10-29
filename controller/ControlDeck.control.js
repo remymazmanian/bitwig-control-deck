@@ -16,11 +16,21 @@ var CONTROL_DECK_TOKEN = "__CONTROL_DECK_TOKEN__";
 var MAX_TRACKS = 128;
 var MAX_DEVICES = 64;
 var MAX_SCENES = 8;
+// Highest launcher slot or scene the tools accept. Bitwig shows MAX_SCENES of
+// them at a time, and withSceneSlot scrolls that window to reach the rest.
+var MAX_SCENE_SLOTS = 1024;
 var MAX_CUE_MARKERS = 256;
+// Longest stretch one launcher print records: about 92 seconds at 666 BPM,
+// inside the print's 115-second limit.
+var MAX_PRINT_SPAN_BEATS = 1024;
 var BROWSER_PAGE = 128;
 var MAX_BROWSER_RESULTS = 16384;
+var MAX_EFFECT_TRACKS = 32;
 var CLIP_GRID_WIDTH = 256;
 var CLIP_GRID_HEIGHT = 128;
+// Largest reply sent back in one datagram. Mirrors MAX_PACKET_BYTES in
+// src/bitwig-client.mjs, which reads replies on a 65536-byte socket buffer.
+var MAX_REPLY_BYTES = 60000;
 
 var application;
 var arranger;
@@ -28,6 +38,7 @@ var cueMarkerBank;
 var project;
 var transport;
 var trackBank;
+var effectTrackBank;
 var cursorTrack;
 var trackIsCursor = [];
 var deviceBank;
@@ -36,7 +47,6 @@ var cursorDeviceSlot;
 var cursorRemoteControlsPage;
 var nestedDeviceBank;
 var launcherClip;
-var arrangerClip;
 var sceneBank;
 var popupBrowser;
 var resultColumn;
@@ -52,16 +62,12 @@ var directValues = {};
 var directDisplays = {};
 var directDisplayObserver;
 var saveToLibraryAction;
-var focusArrangerAction;
-var focusClipLauncherAction;
-var deselectAllAction;
-var copyAction;
-var pasteAction;
-var pasteReferenceAction;
-var copyLauncherToArrangerAction;
 var jumpToBeginningAction;
 var trackMeterLatest = [];
 var trackMeterMaximum = [];
+// Name of the track each maximum was measured on. Maxima are stored by bank
+// position, so a track that moves to another position must not inherit them.
+var trackMeterOwner = [];
 var requestQueue = [];
 var requestBusy = false;
 var currentRequest = null;
@@ -75,9 +81,12 @@ function interested(value) {
 
 // Every delayed step runs through here. An exception in a step used to leave the
 // bridge busy forever; now it fails the request that scheduled the step instead.
+// Steps of a request that already finished, failed or timed out are dropped, so
+// they can't keep changing Bitwig or schedule steps under the next request.
 function later(delay, callback) {
    var owner = currentRequest;
    host.scheduleTask(function() {
+      if (owner && owner.done) return;
       try {
          callback();
       } catch (error) {
@@ -253,7 +262,35 @@ function listTracks() {
       var track = trackBank.getItemAt(i);
       if (track.exists().get()) tracks.push(trackSnapshot(track, i));
    }
-   return { total: total, returned: tracks.length, truncated: total > MAX_TRACKS, tracks: tracks };
+   var result = { total: total, returned: tracks.length, truncated: total > MAX_TRACKS, tracks: tracks };
+   var duplicates = duplicateTrackNames(tracks);
+   if (duplicates.length) {
+      result.duplicateNames = duplicates;
+      result.note = "Tools refuse tracks that share a name. Rename them with bitwig_rename_track first.";
+   }
+   return result;
+}
+
+function duplicateTrackNames(tracks) {
+   var seen = {};
+   var duplicates = [];
+   for (var i = 0; i < tracks.length; i++) {
+      var key = "=" + tracks[i].name;
+      seen[key] = Number(seen[key] || 0) + 1;
+      if (seen[key] === 2) duplicates.push(tracks[i].name);
+   }
+   return duplicates;
+}
+
+// Indices of the reachable tracks with exactly this name.
+function trackIndicesNamed(name) {
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   var indices = [];
+   for (var i = 0; i < count; i++) {
+      var track = trackBank.getItemAt(i);
+      if (track.exists().get() && track.name().get() === name) indices.push(i);
+   }
+   return indices;
 }
 
 function readTrackMeters(resetAfterRead) {
@@ -262,19 +299,24 @@ function readTrackMeters(resetAfterRead) {
    for (var i = 0; i < total; i++) {
       var track = trackBank.getItemAt(i);
       if (!track.exists().get()) continue;
+      var maximum = meterMaximumFor(i, track.name().get());
       meters.push({
          index: i,
          name: track.name().get(),
          latest: Number(trackMeterLatest[i] || 0),
-         maximum: Number(trackMeterMaximum[i] || 0),
-         maximumNormalized: Number(trackMeterMaximum[i] || 0) / 127
+         maximum: maximum,
+         maximumNormalized: maximum / 127
       });
       if (resetAfterRead) trackMeterMaximum[i] = Number(trackMeterLatest[i] || 0);
    }
    return { range: 128, meters: meters };
 }
 
-function requireTrack(params) {
+// API 18 has no stable track IDs (Channel.channelId arrives in API 20), so a track is
+// identified by index plus name. When two tracks share the name, a shifted
+// index could land on the wrong one and still pass, so such tracks are refused
+// unless the caller is renaming one of them.
+function requireTrack(params, allowDuplicateName) {
    var index = Number(params.trackIndex);
    if (index < 0 || index >= MAX_TRACKS || index >= trackBank.itemCount().get()) {
       throw new Error("Track index " + index + " is not available. Refresh with bitwig_tracks.");
@@ -285,6 +327,13 @@ function requireTrack(params) {
    if (currentName !== String(params.trackName)) {
       throw new Error("Safety check failed: track " + index + " is now named ‘" + currentName + "’, not ‘" + params.trackName + "’. Refresh first.");
    }
+   if (!allowDuplicateName) {
+      var sameName = trackIndicesNamed(currentName);
+      if (sameName.length > 1) {
+         throw new Error("Tracks " + sameName.join(", ") + " are all named ‘" + currentName + "’, so Control Deck cannot be sure which one is meant. " +
+            "Rename them with bitwig_rename_track so each name is unique, then try again.");
+      }
+   }
    return track;
 }
 
@@ -292,6 +341,7 @@ function selectTrack(request, params, callback) {
    var track = requireTrack(params);
    var index = Number(params.trackIndex);
    var expectedName = track.name().get();
+   rememberSelection(request);
    track.selectInMixer();
    later(140, function() {
       try {
@@ -306,6 +356,56 @@ function selectTrack(request, params, callback) {
          finish(request, false, { message: String(error.message || error) });
       }
    });
+}
+
+// Tools that work through Bitwig's cursor move the track (and device) selection.
+// The first time a request does that, note what was selected, and put it back
+// when the request ends, whether it succeeded or failed.
+function rememberSelection(request) {
+   if (request.selectionRemembered) return;
+   request.selectionRemembered = true;
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   var saved = null;
+   for (var i = 0; i < count; i++) {
+      if (trackIsCursor[i].get()) {
+         saved = { trackIndex: i, trackName: trackBank.getItemAt(i).name().get(), deviceName: null, devicePosition: -1 };
+         break;
+      }
+   }
+   // Master, effect tracks and tracks past the first 128 can't be selected again
+   // from the main track list, so their selection is left where the tool put it.
+   if (!saved) return;
+   if (cursorDevice.exists().get() && !cursorDevice.isNested().get()) {
+      saved.deviceName = cursorDevice.name().get();
+      saved.devicePosition = cursorDevice.position().get();
+   }
+   var previousCleanup = request.cleanup;
+   request.cleanup = function() {
+      if (previousCleanup) previousCleanup();
+      restoreSelection(saved);
+   };
+}
+
+function restoreSelection(saved) {
+   var track = trackBank.getItemAt(saved.trackIndex);
+   // The track moved or was deleted by the tool: there is nothing safe to go back to.
+   if (!track.exists().get() || track.name().get() !== saved.trackName) return;
+   if (!trackIsCursor[saved.trackIndex].get()) {
+      track.selectInMixer();
+      return;
+   }
+   // Same track: put the device selection back, following the device by name
+   // when the tool inserted or removed devices in front of it.
+   if (saved.deviceName === null) return;
+   if (cursorDevice.exists().get() && cursorDevice.name().get() === saved.deviceName &&
+      cursorDevice.position().get() === saved.devicePosition) return;
+   var count = Math.min(deviceBank.itemCount().get(), MAX_DEVICES);
+   var best = -1;
+   for (var d = 0; d < count; d++) {
+      if (deviceBank.getItemAt(d).name().get() !== saved.deviceName) continue;
+      if (best < 0 || Math.abs(d - saved.devicePosition) < Math.abs(best - saved.devicePosition)) best = d;
+   }
+   if (best >= 0) cursorDevice.selectDevice(deviceBank.getItemAt(best));
 }
 
 function deviceSnapshot(device, index) {
@@ -454,16 +554,41 @@ function noteAuthFailure() {
    }
 }
 
-function respond(replyPort, id, ok, payload) {
+function encodeReply(id, ok, payload) {
+   return encodeUtf8(JSON.stringify({
+      protocol: CONTROL_DECK_PROTOCOL,
+      id: String(id),
+      ok: Boolean(ok),
+      payload: payload || {}
+   }));
+}
+
+// A reply has to fit in one datagram. An oversized reply is replaced by a short
+// error the client can show, and a failed send is logged as an error and
+// reported to the client with a short error reply when that still gets through.
+function respond(replyPort, id, ok, payload, method) {
+   var what = method ? "the " + method + " reply" : "the reply";
+   var bytes = encodeReply(id, ok, payload);
+   if (bytes.length > MAX_REPLY_BYTES) {
+      host.errorln("Control Deck: " + what + " is " + bytes.length + " bytes, over the " + MAX_REPLY_BYTES + "-byte limit.");
+      bytes = encodeReply(id, false, {
+         message: "Bitwig's answer is " + bytes.length + " bytes, over the " + MAX_REPLY_BYTES + "-byte limit for one reply. Ask for less, for example with a smaller limit, an offset or a query.",
+         replyBytes: bytes.length,
+         maxReplyBytes: MAX_REPLY_BYTES
+      });
+   }
    try {
-      host.sendDatagramPacket("127.0.0.1", Number(replyPort), encodeUtf8(JSON.stringify({
-         protocol: CONTROL_DECK_PROTOCOL,
-         id: String(id),
-         ok: Boolean(ok),
-         payload: payload || {}
-      })));
+      host.sendDatagramPacket("127.0.0.1", Number(replyPort), bytes);
    } catch (error) {
-      host.println("Control Deck response error: " + error);
+      host.errorln("Control Deck could not send " + what + " (" + bytes.length + " bytes): " + error);
+      try {
+         host.sendDatagramPacket("127.0.0.1", Number(replyPort), encodeReply(id, false, {
+            message: "Bitwig could not send " + what + " (" + bytes.length + " bytes): " + String(error.message || error),
+            replyBytes: bytes.length
+         }));
+      } catch (secondError) {
+         host.errorln("Control Deck could not send the error reply either: " + secondError);
+      }
    }
 }
 
@@ -471,8 +596,15 @@ function respond(replyPort, id, ok, payload) {
 // failed or timed out are ignored, so they can't release the next request early.
 function finish(request, ok, payload) {
    if (request.done) return;
+   if (request.cleanup) {
+      try {
+         request.cleanup();
+      } catch (error) {
+         host.errorln("Control Deck cleanup error: " + error);
+      }
+   }
    request.done = true;
-   respond(request.source, request.id, ok, payload);
+   respond(request.source, request.id, ok, payload, request.method);
    if (currentRequest === request) {
       currentRequest = null;
       requestBusy = false;
@@ -1024,27 +1156,56 @@ function handleNestDevice(request) {
    });
 }
 
+// Bitwig's API can open the Save to Library dialog but can't see it or type
+// into it. Enter goes to whatever has keyboard focus, so it is only pressed
+// when the caller asks for it (confirm: true) and the same device is still
+// selected on the same track right before the key press.
 function handleSaveDevicePreset(request) {
    var params = request.params;
+   if (!saveToLibraryAction) throw new Error("This Bitwig version has no Save to Library action, so the preset can't be saved from Control Deck.");
    selectDevice(request, params, function(device) {
       try {
          var presetName = String(params.presetName || "").trim();
+         var confirm = params.confirm === true;
+         var trackName = cursorTrack.name().get();
+         var deviceName = device.name().get();
+         var devicePosition = device.position().get();
+         var presetNameBefore = device.presetName().get();
          device.selectInEditor();
          later(180, function() {
             try {
                saveToLibraryAction.invoke();
                later(700, function() {
-                  if (params.confirm !== false) application.enter();
-                  later(450, function() {
-                     finish(request, true, {
-                        device: deviceSnapshot(device, Number(params.deviceIndex)),
-                        requestedPresetName: presetName,
-                        saveToLibraryOpened: true,
-                        confirmationSent: params.confirm !== false,
-                        nameEntryRequired: params.confirm === false && !!presetName,
-                        suggestedPresetName: presetName || null
+                  try {
+                     if (confirm) {
+                        var stillSelected = cursorTrack.name().get() === trackName &&
+                           cursorDevice.exists().get() &&
+                           cursorDevice.name().get() === deviceName &&
+                           cursorDevice.position().get() === devicePosition;
+                        if (!stillSelected) {
+                           throw new Error("The selection changed while Bitwig's Save to Library dialog was opening, so Enter was not pressed. Check Bitwig and close the dialog if it is open.");
+                        }
+                        application.enter();
+                     }
+                     later(450, function() {
+                        var presetNameAfter = device.presetName().get();
+                        finish(request, true, {
+                           device: deviceSnapshot(device, Number(params.deviceIndex)),
+                           requestedPresetName: presetName,
+                           saveToLibraryOpened: true,
+                           confirmationSent: confirm,
+                           presetNameBefore: presetNameBefore,
+                           presetNameAfter: presetNameAfter,
+                           note: confirm
+                              ? "Bitwig doesn't report whether the dialog saved. A changed presetNameAfter is a good sign; check the Library to be sure."
+                              : "The dialog is open in Bitwig. Type the name and press Save there.",
+                           nameEntryRequired: !confirm && !!presetName,
+                           suggestedPresetName: presetName || null
+                        });
                      });
-                  });
+                  } catch (error) {
+                     finish(request, false, { message: String(error.message || error) });
+                  }
                });
             } catch (error) {
                finish(request, false, { message: String(error.message || error) });
@@ -1135,6 +1296,13 @@ function handleCueMarkers(request) {
    var updated = 0;
    var current = 0;
    var originalTransportPosition = transport.getPosition().get();
+   var movedPlayhead = false;
+   // A new marker at the playhead itself goes last, so it cannot sit under the
+   // playhead while the other new markers are added.
+   normalized.sort(function(left, right) {
+      return Number(Math.abs(left.positionBeats - originalTransportPosition) < 0.0001) -
+         Number(Math.abs(right.positionBeats - originalTransportPosition) < 0.0001);
+   });
    var temporaryPosition = 64;
    var existingMarkers = listCueMarkers().markers;
    for (var existingIndex = 0; existingIndex < existingMarkers.length; existingIndex++) {
@@ -1144,9 +1312,22 @@ function handleCueMarkers(request) {
       temporaryPosition = Math.max(temporaryPosition, normalized[requestedIndex].positionBeats + 64);
    }
 
+   // Bitwig 18 can only add a cue marker at the play position, so new markers
+   // are added where the playhead already is and then moved into place. The
+   // playhead is moved only when the transport is stopped and a marker already
+   // sits under it, and it is put back before the reply.
+   function restorePlayhead() {
+      if (movedPlayhead) transport.setPosition(originalTransportPosition);
+   }
+
+   function fail(error) {
+      restorePlayhead();
+      finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
+   }
+
    function verifyAndFinish() {
-      transport.setPosition(originalTransportPosition);
-      later(220, function() {
+      restorePlayhead();
+      later(movedPlayhead ? 220 : 120, function() {
          try {
             var verified = [];
             var missing = [];
@@ -1180,6 +1361,72 @@ function handleCueMarkers(request) {
       });
    }
 
+   function addAndPlace(expected) {
+      var beforeCounts = cueMarkerFingerprintCounts();
+      var beforeTotal = cueMarkerBank.itemCount().get();
+      transport.addCueMarkerAtPlaybackPosition();
+      var identifyAttempt = 0;
+
+      function identifyInsertedMarker() {
+         try {
+            var afterTotal = cueMarkerBank.itemCount().get();
+            if (afterTotal <= beforeTotal) {
+               if (identifyAttempt++ < 20) {
+                  later(100, identifyInsertedMarker);
+                  return;
+               }
+               throw new Error("Bitwig did not create a new cue marker at the play position.");
+            }
+
+            var afterSeen = {};
+            var inserted = null;
+            var count = Math.min(afterTotal, MAX_CUE_MARKERS);
+            for (var markerIndex = 0; markerIndex < count; markerIndex++) {
+               var marker = cueMarkerBank.getItemAt(markerIndex);
+               if (!marker.exists().get()) continue;
+               var fingerprint = JSON.stringify([marker.name().get(), marker.position().get()]);
+               afterSeen[fingerprint] = Number(afterSeen[fingerprint] || 0) + 1;
+               if (!inserted && afterSeen[fingerprint] > Number(beforeCounts[fingerprint] || 0)) {
+                  inserted = marker;
+               }
+            }
+            if (!inserted) throw new Error("Bitwig created a cue marker but the bridge could not identify it.");
+
+            inserted.name().set(expected.name);
+            inserted.position().setRaw(expected.positionBeats);
+            created++;
+            later(240, processNext);
+         } catch (error) {
+            fail(error);
+         }
+      }
+      later(100, identifyInsertedMarker);
+   }
+
+   function addAtTemporaryPosition(expected) {
+      var insertionPosition = temporaryPosition;
+      temporaryPosition += 4;
+      movedPlayhead = true;
+      transport.setPosition(insertionPosition);
+      var positionAttempt = 0;
+
+      function waitForInsertionPosition() {
+         try {
+            if (Math.abs(transport.getPosition().get() - insertionPosition) >= 0.0001) {
+               if (positionAttempt++ < 20) {
+                  later(100, waitForInsertionPosition);
+                  return;
+               }
+               throw new Error("Bitwig did not verify the temporary cue-marker insertion position.");
+            }
+            addAndPlace(expected);
+         } catch (error) {
+            fail(error);
+         }
+      }
+      later(100, waitForInsertionPosition);
+   }
+
    function processNext() {
       try {
          if (current >= normalized.length) {
@@ -1197,70 +1444,13 @@ function handleCueMarkers(request) {
             return;
          }
 
-         var insertionPosition = temporaryPosition;
-         temporaryPosition += 4;
-         transport.setPosition(insertionPosition);
-         var positionAttempt = 0;
-
-         function waitForInsertionPosition() {
-            try {
-               if (Math.abs(transport.getPosition().get() - insertionPosition) >= 0.0001) {
-                  if (positionAttempt++ < 20) {
-                     later(100, waitForInsertionPosition);
-                     return;
-                  }
-                  throw new Error("Bitwig did not verify the temporary cue-marker insertion position.");
-               }
-
-               var beforeCounts = cueMarkerFingerprintCounts();
-               var beforeTotal = cueMarkerBank.itemCount().get();
-               transport.addCueMarkerAtPlaybackPosition();
-               var identifyAttempt = 0;
-
-               function identifyInsertedMarker() {
-                  try {
-               var afterTotal = cueMarkerBank.itemCount().get();
-               if (afterTotal <= beforeTotal) {
-                  if (identifyAttempt++ < 20) {
-                     later(100, identifyInsertedMarker);
-                     return;
-                  }
-                  throw new Error("Bitwig did not create a new cue marker at the play position.");
-               }
-
-               var afterSeen = {};
-               var inserted = null;
-               var count = Math.min(afterTotal, MAX_CUE_MARKERS);
-               for (var markerIndex = 0; markerIndex < count; markerIndex++) {
-                  var marker = cueMarkerBank.getItemAt(markerIndex);
-                  if (!marker.exists().get()) continue;
-                  var fingerprint = JSON.stringify([marker.name().get(), marker.position().get()]);
-                  afterSeen[fingerprint] = Number(afterSeen[fingerprint] || 0) + 1;
-                  if (!inserted && afterSeen[fingerprint] > Number(beforeCounts[fingerprint] || 0)) {
-                     inserted = marker;
-                  }
-               }
-               if (!inserted) throw new Error("Bitwig created a cue marker but the bridge could not identify it.");
-
-               inserted.name().set(expected.name);
-               inserted.position().setRaw(expected.positionBeats);
-               created++;
-               later(240, processNext);
-                  } catch (error) {
-                     transport.setPosition(originalTransportPosition);
-                     finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
-                  }
-               }
-               later(100, identifyInsertedMarker);
-            } catch (error) {
-               transport.setPosition(originalTransportPosition);
-               finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
-            }
+         if (!transport.isPlaying().get() && cueMarkerAtPosition(transport.getPosition().get())) {
+            addAtTemporaryPosition(expected);
+            return;
          }
-         later(100, waitForInsertionPosition);
+         addAndPlace(expected);
       } catch (error) {
-         transport.setPosition(originalTransportPosition);
-         finish(request, false, { message: String(error.message || error), cueMarkers: listCueMarkers() });
+         fail(error);
       }
    }
 
@@ -1268,30 +1458,144 @@ function handleCueMarkers(request) {
    later(180, processNext);
 }
 
+// Names of the tracks or devices a bank shows, in order, for before/after
+// comparisons around a create or delete.
+function bankNames(bank, limit) {
+   var count = Math.min(bank.itemCount().get(), limit);
+   var names = [];
+   for (var index = 0; index < count; index++) {
+      var item = bank.getItemAt(index);
+      names.push(item.exists().get() ? String(item.name().get()) : null);
+   }
+   return names;
+}
+
+// Where `after` equals `before` with one item inserted, returns that item's
+// index. Returns -1 when the lists differ in some other way, and null when the
+// new item's name matches a neighbour so its position cannot be told apart.
+function insertedIndex(before, after) {
+   if (after.length !== before.length + 1) return -1;
+   var prefix = 0;
+   while (prefix < before.length && before[prefix] === after[prefix]) prefix++;
+   var suffix = 0;
+   while (suffix < before.length && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+   if (prefix + suffix < before.length) return -1;
+   return prefix + suffix === before.length ? prefix : null;
+}
+
+// Where the bank lost `removed` items starting at `index` and everything else
+// kept its order, returns true. Only the names the bank shows are compared, so
+// this also works when the project has more items than the bank can reach.
+function isRemovedRun(before, after, index, removed) {
+   if (removed < 1 || index + removed > before.length) return false;
+   for (var i = 0; i < index; i++) {
+      if (before[i] !== after[i]) return false;
+   }
+   for (var j = index; j < after.length && j + removed < before.length; j++) {
+      if (before[j + removed] !== after[j]) return false;
+   }
+   return true;
+}
+
 function handleCreateTrack(request) {
    var params = request.params;
-   var before = trackBank.itemCount().get();
+   var effect = params.kind === "effect";
+   if (params.kind !== "instrument" && params.kind !== "audio" && !effect) {
+      throw new Error("Track kind must be instrument, audio, or effect.");
+   }
+   var bank = effect ? effectTrackBank : trackBank;
+   var limit = effect ? MAX_EFFECT_TRACKS : MAX_TRACKS;
+   var before = bankNames(bank, limit);
+   if (bank.itemCount().get() >= limit) {
+      throw new Error("The project already has " + bank.itemCount().get() + " " + (effect ? "effect" : "main") +
+         " tracks, and Control Deck can reach only the first " + limit + ". No track was created.");
+   }
    if (params.kind === "instrument") application.createInstrumentTrack(-1);
    else if (params.kind === "audio") application.createAudioTrack(-1);
-   else if (params.kind === "effect") application.createEffectTrack(-1);
-   else throw new Error("Track kind must be instrument, audio, or effect.");
+   else application.createEffectTrack(-1);
 
-   later(350, function() {
+   var attempt = 0;
+   function locate() {
       try {
-         var after = trackBank.itemCount().get();
-         if (after <= before || before >= MAX_TRACKS) {
-            throw new Error("Bitwig did not expose the new track in the main track list.");
+         var after = bankNames(bank, limit);
+         var index = insertedIndex(before, after);
+         if (index !== -1 && index !== null) {
+            nameTrack(index);
+            return;
          }
-         var track = trackBank.getItemAt(before);
-         track.setName(String(params.name));
-         track.selectInMixer();
-         later(140, function() {
-            finish(request, true, { created: trackSnapshot(track, before), emptyDeviceChain: true, presetLoaded: false });
-         });
+         if (attempt++ < 20) {
+            later(100, locate);
+            return;
+         }
+         if (index === -1) {
+            throw new Error("Bitwig did not show exactly one new track in the " + (effect ? "effect" : "main") +
+               " track list, so the new track was left unnamed. Check the project with bitwig_tracks.");
+         }
+         throw new Error("Bitwig gave the new track the same name as the track next to it, " +
+            "so the bridge cannot tell which one is new. It was left unnamed.");
       } catch (error) {
          finish(request, false, { message: String(error.message || error) });
       }
-   });
+   }
+
+   function nameTrack(index) {
+      var track = bank.getItemAt(index);
+      track.setName(String(params.name));
+      if (!effect) track.selectInMixer();
+      var nameAttempt = 0;
+      function verifyName() {
+         try {
+            if (track.name().get() !== String(params.name)) {
+               if (nameAttempt++ < 10) {
+                  later(100, verifyName);
+                  return;
+               }
+               throw new Error("Bitwig created the track at index " + index + " but did not apply the name ‘" + params.name + "’.");
+            }
+            var created = effect ? { index: index, name: track.name().get() } : trackSnapshot(track, index);
+            created.kind = params.kind;
+            if (effect) created.effectTrackIndex = index;
+            finish(request, true, { created: created, emptyDeviceChain: true, presetLoaded: false });
+         } catch (error) {
+            finish(request, false, { message: String(error.message || error) });
+         }
+      }
+      later(140, verifyName);
+   }
+   later(200, locate);
+}
+
+// Deletes one track or device and checks Bitwig's list afterwards: the item
+// must be gone and everything else must still be in the same order.
+function deleteAndVerify(request, bank, limit, index, item, deleted, what) {
+   var before = bankNames(bank, limit);
+   var totalBefore = bank.itemCount().get();
+   item.deleteObject();
+   var attempt = 0;
+   function verify() {
+      try {
+         var after = bankNames(bank, limit);
+         var removed = totalBefore - bank.itemCount().get();
+         if (!isRemovedRun(before, after, index, removed)) {
+            if (attempt++ < 20) {
+               later(100, verify);
+               return;
+            }
+            finish(request, false, {
+               message: "Bitwig did not confirm that the " + what + " ‘" + deleted.name + "’ was removed and the rest left in place. Check it in Bitwig.",
+               previousCount: totalBefore,
+               verifiedCount: bank.itemCount().get()
+            });
+            return;
+         }
+         var payload = { deleted: deleted, previousCount: totalBefore, verifiedCount: totalBefore - removed, removedCount: removed };
+         if (removed > 1) payload.note = "Bitwig removed " + removed + " " + what + "s; a group takes its contents with it.";
+         finish(request, true, payload);
+      } catch (error) {
+         finish(request, false, { message: String(error.message || error) });
+      }
+   }
+   later(250, verify);
 }
 
 function markSlot(slot) {
@@ -1358,10 +1662,16 @@ function handleSetTrackMix(request) {
 
 function handleRenameTrack(request) {
    var params = request.params;
-   var track = requireTrack(params);
+   var track = requireTrack(params, true);
    var oldName = track.name().get();
    var newName = String(params.newName || "").trim();
    if (!newName || newName.length > 120) throw new Error("New track name must contain 1 to 120 characters.");
+   var taken = trackIndicesNamed(newName);
+   for (var takenIndex = 0; takenIndex < taken.length; takenIndex++) {
+      if (taken[takenIndex] !== Number(params.trackIndex)) {
+         throw new Error("Track " + taken[takenIndex] + " is already named ‘" + newName + "’. Pick a unique name so tools can tell the tracks apart.");
+      }
+   }
    track.setName(newName);
    later(120, function() {
       try {
@@ -1533,14 +1843,58 @@ function compareWrittenNotes(validated, stepSize, actual) {
    return { expectedCount: expected.length, problems: problems };
 }
 
+// Bitwig shows MAX_SCENES launcher slots at a time. This scrolls that window
+// until slotIndex is in view and calls callback(item, localIndex), where item
+// is the track's slot, or the scene when track is null. The window goes back to
+// the first scenes when the request ends.
+function withSceneSlot(request, track, slotIndex, callback) {
+   var sceneCount = sceneBank.itemCount().get();
+   if (slotIndex >= sceneCount) {
+      throw new Error("Slot " + slotIndex + " does not exist. The project has " + sceneCount + " scenes, so slots run from 0 to " + (sceneCount - 1) + ".");
+   }
+   // Run after any cleanup the request already has, such as putting the
+   // selection back, and only add it once per request.
+   if (!request.sceneWindowCleanup) {
+      request.sceneWindowCleanup = true;
+      var previousCleanup = request.cleanup;
+      request.cleanup = function() {
+         resetSceneWindow();
+         if (previousCleanup) previousCleanup();
+      };
+   }
+   var target = Math.floor(slotIndex / MAX_SCENES) * MAX_SCENES;
+   var attempts = 0;
+   function showSlot() {
+      var position = sceneBank.scrollPosition().get();
+      if (slotIndex >= position && slotIndex < position + MAX_SCENES) {
+         var localIndex = slotIndex - position;
+         callback(track ? track.clipLauncherSlotBank().getItemAt(localIndex) : sceneBank.getItemAt(localIndex), localIndex);
+         return;
+      }
+      if (attempts++ >= 20) throw new Error("Bitwig did not scroll its scene window to slot " + slotIndex + ".");
+      sceneBank.scrollPosition().set(target);
+      later(50, showSlot);
+   }
+   showSlot();
+}
+
+function resetSceneWindow() {
+   if (sceneBank.scrollPosition().get() !== 0) sceneBank.scrollPosition().set(0);
+}
+
+function requireSlotIndex(value, label) {
+   var slotIndex = Number(value);
+   if (!(slotIndex >= 0 && slotIndex < MAX_SCENE_SLOTS) || Math.floor(slotIndex) !== slotIndex) {
+      throw new Error(label + " slot must be a whole number from 0 to " + (MAX_SCENE_SLOTS - 1) + ".");
+   }
+   return slotIndex;
+}
+
 function handleCreateNoteClip(request) {
    var params = request.params;
-   var slotIndex = Number(params.slotIndex);
+   var slotIndex = requireSlotIndex(params.slotIndex, "Clip");
    var lengthBeats = Number(params.lengthBeats);
    var stepSize = Number(params.stepSize || 0.25);
-   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-      throw new Error("Clip slot must be between 0 and " + (MAX_SCENES - 1) + ".");
-   }
    if (!(lengthBeats >= 1 && lengthBeats <= 512) || Math.floor(lengthBeats) !== lengthBeats) {
       throw new Error("Clip length must be a whole number from 1 to 512 beats.");
    }
@@ -1548,387 +1902,182 @@ function handleCreateNoteClip(request) {
    var validated = validateClipNotes(params.notes || [], stepSize, lengthBeats);
 
    selectTrack(request, params, function(track) {
-      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
-      later(100, function() {
-         try {
-            if (slot.hasContent().get() && !params.replace) {
-               throw new Error("Clip slot " + slotIndex + " already has content. Pass replace=true to replace it.");
-            }
+      var sceneCount = sceneBank.itemCount().get();
+      if (slotIndex > sceneCount) {
+         throw new Error("Slot " + slotIndex + " is past the end of the launcher. The project has " + sceneCount +
+            " scenes, so a new clip can go in slot " + sceneCount + " at most.");
+      }
+      if (slotIndex === sceneCount) {
+         createInNewScene(request, track, slotIndex, lengthBeats, function() {
+            withSceneSlot(request, track, slotIndex, function(slot) {
+               fillNewClip(request, params, slot, slotIndex, lengthBeats, stepSize, validated);
+            });
+         });
+         return;
+      }
+      withSceneSlot(request, track, slotIndex, function(slot) {
+         later(100, function() {
+            try {
+               if (slot.hasContent().get() && !params.replace) {
+                  throw new Error("Clip slot " + slotIndex + " already has content. Pass replace=true to replace it.");
+               }
 
-            function createClip() {
-               slot.createEmptyClip(lengthBeats);
-               later(180, function() {
-                  try {
-                     slot.select();
-                     later(180, function() {
-                        try {
-                           if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the new launcher clip.");
-                           launcherClip.setStepSize(stepSize);
-                           launcherClip.scrollToKey(0);
-                           launcherClip.scrollToStep(0);
-                           launcherClip.setName(String(params.clipName));
-                           launcherClip.getLoopStart().set(0);
-                           launcherClip.getLoopLength().set(lengthBeats);
-                           launcherClip.getPlayStart().set(0);
-                           launcherClip.getPlayStop().set(lengthBeats);
-                           launcherClip.isLoopEnabled().set(true);
-                           writeClipPages(launcherClip, validated, 0, function(error) {
-                              if (error) {
-                                 finish(request, false, { message: String(error.message || error) });
-                                 return;
-                              }
-                              later(280, function() {
-                                 try {
-                                    var snapshot = clipSnapshot(slot, slotIndex);
-                                    if (!snapshot.hasContent) throw new Error("Bitwig did not confirm clip content.");
-                                    readLauncherNotes(lengthBeats, stepSize, function(readError, actual) {
-                                       if (readError) {
-                                          finish(request, false, { message: "Could not read the clip back after writing: " + String(readError.message || readError) });
-                                          return;
-                                       }
-                                       var check = compareWrittenNotes(validated, stepSize, actual);
-                                       if (check.problems.length) {
-                                          var shown = check.problems.slice(0, 5).join("; ");
-                                          var more = check.problems.length > 5 ? "; and " + (check.problems.length - 5) + " more" : "";
-                                          finish(request, false, {
-                                             message: "Note verification failed: clip slot " + slotIndex + " does not match the " + check.expectedCount + " requested notes after writing. " + shown + more + "."
-                                          });
-                                          return;
-                                       }
-                                       finish(request, true, {
-                                          track: { index: params.trackIndex, name: params.trackName },
-                                          clip: clipSnapshot(slot, slotIndex),
-                                          lengthBeats: launcherClip.getLoopLength().get(),
-                                          stepSize: stepSize,
-                                          notesWritten: validated.noteCount,
-                                          notesVerified: actual.length
-                                       });
-                                    });
-                                 } catch (verificationError) {
-                                    finish(request, false, { message: String(verificationError.message || verificationError) });
-                                 }
-                              });
-                           });
-                        } catch (error) {
-                           finish(request, false, { message: String(error.message || error) });
-                        }
-                     });
-                  } catch (error) {
-                     finish(request, false, { message: String(error.message || error) });
-                  }
-               });
-            }
+               function createClip() {
+                  slot.createEmptyClip(lengthBeats);
+                  fillNewClip(request, params, slot, slotIndex, lengthBeats, stepSize, validated);
+               }
 
-            if (slot.hasContent().get()) {
-               slot.deleteObject();
-               later(180, createClip);
-            } else createClip();
-         } catch (error) {
-            finish(request, false, { message: String(error.message || error) });
-         }
+               if (slot.hasContent().get()) {
+                  slot.deleteObject();
+                  later(180, createClip);
+               } else createClip();
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
       });
+   });
+}
+
+// Bitwig creates the clip and a new scene for it when slotIndex is one past
+// the last scene, then reports the extra scene.
+function createInNewScene(request, track, slotIndex, lengthBeats, callback) {
+   track.createNewLauncherClip(slotIndex, lengthBeats);
+   var attempts = 0;
+   function waitForScene() {
+      if (sceneBank.itemCount().get() > slotIndex) {
+         callback();
+         return;
+      }
+      if (attempts++ >= 20) throw new Error("Bitwig did not add a scene for the new clip in slot " + slotIndex + ".");
+      later(50, waitForScene);
+   }
+   later(50, waitForScene);
+}
+
+// Selects a freshly created clip, writes its settings and notes, and reads
+// every note back.
+function fillNewClip(request, params, slot, slotIndex, lengthBeats, stepSize, validated) {
+   later(180, function() {
+      try {
+         slot.select();
+         later(180, function() {
+            try {
+               if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the new launcher clip.");
+               launcherClip.setStepSize(stepSize);
+               launcherClip.scrollToKey(0);
+               launcherClip.scrollToStep(0);
+               launcherClip.setName(String(params.clipName));
+               launcherClip.getLoopStart().set(0);
+               launcherClip.getLoopLength().set(lengthBeats);
+               launcherClip.getPlayStart().set(0);
+               launcherClip.getPlayStop().set(lengthBeats);
+               launcherClip.isLoopEnabled().set(true);
+               writeClipPages(launcherClip, validated, 0, function(error) {
+                  if (error) {
+                     finish(request, false, { message: String(error.message || error) });
+                     return;
+                  }
+                  later(280, function() {
+                     try {
+                        var snapshot = clipSnapshot(slot, slotIndex);
+                        if (!snapshot.hasContent) throw new Error("Bitwig did not confirm clip content.");
+                        readLauncherNotes(lengthBeats, stepSize, function(readError, actual) {
+                           if (readError) {
+                              finish(request, false, { message: "Could not read the clip back after writing: " + String(readError.message || readError) });
+                              return;
+                           }
+                           var check = compareWrittenNotes(validated, stepSize, actual);
+                           if (check.problems.length) {
+                              var shown = check.problems.slice(0, 5).join("; ");
+                              var more = check.problems.length > 5 ? "; and " + (check.problems.length - 5) + " more" : "";
+                              finish(request, false, {
+                                 message: "Note verification failed: clip slot " + slotIndex + " does not match the " + check.expectedCount + " requested notes after writing. " + shown + more + "."
+                              });
+                              return;
+                           }
+                           finish(request, true, {
+                              track: { index: params.trackIndex, name: params.trackName },
+                              clip: clipSnapshot(slot, slotIndex),
+                              lengthBeats: launcherClip.getLoopLength().get(),
+                              stepSize: stepSize,
+                              notesWritten: validated.noteCount,
+                              notesVerified: actual.length
+                           });
+                        });
+                     } catch (verificationError) {
+                        finish(request, false, { message: String(verificationError.message || verificationError) });
+                     }
+                  });
+               });
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
+      } catch (error) {
+         finish(request, false, { message: String(error.message || error) });
+      }
    });
 }
 
 function handleClipNotes(request) {
    var params = request.params;
-   var slotIndex = Number(params.slotIndex);
+   var slotIndex = requireSlotIndex(params.slotIndex, "Clip");
    var stepSize = Number(params.stepSize || 0.25);
-   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-      throw new Error("Clip slot must be between 0 and " + (MAX_SCENES - 1) + ".");
-   }
    if (!(stepSize >= 0.03125 && stepSize <= 4)) throw new Error("Clip step size must be between 1/128 and 4 beats.");
 
    selectTrack(request, params, function(track) {
-      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
-      if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip.");
-      slot.select();
-      slot.showInEditor();
-      later(240, function() {
-         try {
-            if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
-            var loopStart = launcherClip.getLoopStart().get();
-            var loopLength = launcherClip.getLoopLength().get();
-            var lengthBeats = loopStart + loopLength;
-            if (!(lengthBeats > 0 && lengthBeats <= 512)) {
-               throw new Error("Clips must end within 512 beats to be read; this one ends at beat " + lengthBeats + ".");
-            }
-            readLauncherNotes(lengthBeats, stepSize, function(error, notes) {
-               if (error) {
-                  finish(request, false, { message: String(error.message || error) });
-                  return;
+      withSceneSlot(request, track, slotIndex, function(slot) {
+         if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip.");
+         slot.select();
+         slot.showInEditor();
+         later(240, function() {
+            try {
+               if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
+               var loopStart = launcherClip.getLoopStart().get();
+               var loopLength = launcherClip.getLoopLength().get();
+               var lengthBeats = loopStart + loopLength;
+               if (!(lengthBeats > 0 && lengthBeats <= 512)) {
+                  throw new Error("Clips must end within 512 beats to be read; this one ends at beat " + lengthBeats + ".");
                }
-               finish(request, true, {
-                  track: { index: params.trackIndex, name: params.trackName },
-                  clip: clipSnapshot(slot, slotIndex),
-                  lengthBeats: lengthBeats,
-                  loopStartBeats: loopStart,
-                  loopLengthBeats: loopLength,
-                  stepSize: stepSize,
-                  quantized: true,
-                  noteCount: notes.length,
-                  notes: notes
+               readLauncherNotes(lengthBeats, stepSize, function(error, notes) {
+                  if (error) {
+                     finish(request, false, { message: String(error.message || error) });
+                     return;
+                  }
+                  finish(request, true, {
+                     track: { index: params.trackIndex, name: params.trackName },
+                     clip: clipSnapshot(slot, slotIndex),
+                     lengthBeats: lengthBeats,
+                     loopStartBeats: loopStart,
+                     loopLengthBeats: loopLength,
+                     stepSize: stepSize,
+                     quantized: true,
+                     noteCount: notes.length,
+                     notes: notes
+                  });
                });
-            });
-         } catch (error) {
-            finish(request, false, { message: String(error.message || error) });
-         }
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
       });
    });
-}
-
-function readLauncherTemplate(track, slotIndex, callback) {
-   try {
-      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
-      if (!slot.hasContent().get()) throw new Error("Source launcher slot " + slotIndex + " has no clip.");
-      slot.select();
-      slot.showInEditor();
-      later(240, function() {
-         try {
-            if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the source launcher clip.");
-            var stepSize = 0.25;
-            var loopLength = launcherClip.getLoopLength().get();
-            if (!(loopLength > 0 && loopLength <= 64)) {
-               throw new Error("Source launcher clips must be between 0 and 64 beats long.");
-            }
-            readLauncherNotes(loopLength, stepSize, function(error, read) {
-               if (error) {
-                  callback(error);
-                  return;
-               }
-               var notes = read.map(function(note) {
-                  return { beat: note.beat, pitch: note.pitch, velocity: note.velocity, duration: Math.max(stepSize, note.duration), channel: note.channel };
-               });
-               if (!notes.length) {
-                  callback(new Error("The source launcher clip contains no readable MIDI notes."));
-                  return;
-               }
-               callback(null, { lengthBeats: loopLength, stepSize: stepSize, notes: notes });
-            });
-         } catch (error) {
-            callback(error);
-         }
-      });
-   } catch (error) {
-      callback(error);
-   }
-}
-
-function handleArrangeLauncherClips(request) {
-   var params = request.params;
-   var regions = params.regions || [];
-   if (!regions.length) throw new Error("At least one Arranger clip region is required.");
-   if (regions.length > 64) throw new Error("A maximum of 64 Arranger clip regions can be created at once.");
-
-   var normalized = [];
-   for (var regionIndex = 0; regionIndex < regions.length; regionIndex++) {
-      var region = regions[regionIndex] || {};
-      var track = requireTrack(region);
-      var slotIndex = Number(region.slotIndex);
-      var startBeats = Number(region.startBeats);
-      var lengthBeats = Number(region.lengthBeats);
-      var clipName = String(region.clipName || "").trim();
-      if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-         throw new Error("Region " + regionIndex + " has an invalid launcher slot.");
-      }
-      if (!(startBeats >= 0)) throw new Error("Region " + regionIndex + " has an invalid start position.");
-      if (!(lengthBeats >= 1 && lengthBeats <= 512) || Math.floor(lengthBeats) !== lengthBeats) {
-         throw new Error("Region " + regionIndex + " must be between 1 and 512 whole beats long.");
-      }
-      if (!clipName) throw new Error("Region " + regionIndex + " needs a clip name.");
-      normalized.push({
-         track: track,
-         trackIndex: Number(region.trackIndex),
-         trackName: String(region.trackName),
-         slotIndex: slotIndex,
-         startBeats: startBeats,
-         lengthBeats: lengthBeats,
-         clipName: clipName
-      });
-   }
-
-   var originalTransportPosition = transport.getPosition().get();
-   var templates = {};
-   var created = [];
-   var current = 0;
-
-   function restoreAndFinish(ok, payload) {
-      transport.setPosition(originalTransportPosition);
-      later(180, function() { finish(request, ok, payload); });
-   }
-
-   function createRegion(region, template) {
-      var repeatedNotes = [];
-      for (var offset = 0; offset < region.lengthBeats; offset += template.lengthBeats) {
-         for (var noteIndex = 0; noteIndex < template.notes.length; noteIndex++) {
-            var sourceNote = template.notes[noteIndex];
-            if (offset + sourceNote.beat >= region.lengthBeats) continue;
-            repeatedNotes.push({
-               beat: offset + sourceNote.beat,
-               pitch: sourceNote.pitch,
-               velocity: sourceNote.velocity,
-               duration: Math.min(sourceNote.duration, region.lengthBeats - (offset + sourceNote.beat)),
-               channel: sourceNote.channel
-            });
-         }
-      }
-      var validated = validateClipNotes(repeatedNotes, template.stepSize, region.lengthBeats);
-
-      var sourceSlot = region.track.clipLauncherSlotBank().getItemAt(region.slotIndex);
-      deselectAllAction.invoke();
-      region.track.selectInMixer();
-      focusClipLauncherAction.invoke();
-      later(120, function() {
-         try {
-            sourceSlot.select();
-            later(120, function() {
-               try {
-                  copyAction.invoke();
-                  later(120, function() {
-                     try {
-                        focusArrangerAction.invoke();
-                        region.track.makeVisibleInArranger();
-                        later(120, function() {
-                           try {
-                              deselectAllAction.invoke();
-                              region.track.selectInMixer();
-                              transport.setPosition(region.startBeats);
-                              var positionAttempts = 0;
-
-                              function waitForPosition() {
-                                 try {
-                                    if (Math.abs(transport.getPosition().get() - region.startBeats) >= 0.0001) {
-                                       if (positionAttempts++ < 25) {
-                                          later(100, waitForPosition);
-                                          return;
-                                       }
-                                       throw new Error("Bitwig did not verify the Arranger clip start position.");
-                                    }
-
-                                    pasteReferenceAction.invoke();
-                                    var createAttempts = 0;
-                                    function waitForClip() {
-                                       try {
-                                          if (!arrangerClip.exists().get()) {
-                                             if (createAttempts++ < 25) {
-                                                later(100, waitForClip);
-                                                return;
-                                             }
-                                             throw new Error("Bitwig did not paste the Launcher clip into the Arranger.");
-                                          }
-
-                                          arrangerClip.setStepSize(template.stepSize);
-                                          arrangerClip.scrollToKey(0);
-                                          arrangerClip.scrollToStep(0);
-                                          arrangerClip.clearSteps();
-                                          arrangerClip.setName(region.clipName);
-                                          arrangerClip.getLoopStart().set(0);
-                                          arrangerClip.getLoopLength().set(region.lengthBeats);
-                                          arrangerClip.getPlayStart().set(0);
-                                          arrangerClip.getPlayStop().set(region.lengthBeats);
-                                          arrangerClip.isLoopEnabled().set(false);
-                                          writeClipPages(arrangerClip, validated, 0, function(error) {
-                                             if (error) {
-                                                restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                                return;
-                                             }
-                                             later(260, function() {
-                                                try {
-                                                   if (arrangerClip.getPlayStop().get() !== region.lengthBeats) {
-                                                      throw new Error("Bitwig did not verify the Arranger clip length.");
-                                                   }
-                                                   created.push({
-                                                      trackIndex: region.trackIndex,
-                                                      trackName: region.trackName,
-                                                      slotIndex: region.slotIndex,
-                                                      startBeats: region.startBeats,
-                                                      lengthBeats: region.lengthBeats,
-                                                      clipName: arrangerClip.exists().get() ? region.clipName : null,
-                                                      notesWritten: validated.noteCount
-                                                   });
-                                                   processNext();
-                                                } catch (error) {
-                                                   restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                                }
-                                             });
-                                          });
-                                       } catch (error) {
-                                          restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                       }
-                                    }
-                                    later(180, waitForClip);
-                                 } catch (error) {
-                                    restoreAndFinish(false, { message: String(error.message || error), created: created });
-                                 }
-                              }
-                              later(100, waitForPosition);
-                           } catch (error) {
-                              restoreAndFinish(false, { message: String(error.message || error), created: created });
-                           }
-                        });
-                     } catch (error) {
-                        restoreAndFinish(false, { message: String(error.message || error), created: created });
-                     }
-                  });
-               } catch (error) {
-                  restoreAndFinish(false, { message: String(error.message || error), created: created });
-               }
-            });
-         } catch (error) {
-            restoreAndFinish(false, { message: String(error.message || error), created: created });
-         }
-      });
-   }
-
-   function processNext() {
-      try {
-         if (current >= normalized.length) {
-            var returnedTracks = {};
-            for (var regionIndex = 0; regionIndex < normalized.length; regionIndex++) {
-               var normalizedRegion = normalized[regionIndex];
-               var returnKey = String(normalizedRegion.trackIndex);
-               if (!returnedTracks[returnKey]) {
-                  normalizedRegion.track.returnToArrangement();
-                  returnedTracks[returnKey] = true;
-               }
-            }
-            restoreAndFinish(true, {
-               created: created.length,
-               verified: created.length,
-               clips: created
-            });
-            return;
-         }
-
-         var region = normalized[current++];
-         var templateKey = region.trackIndex + ":" + region.slotIndex;
-         if (templates[templateKey]) {
-            createRegion(region, templates[templateKey]);
-            return;
-         }
-         readLauncherTemplate(region.track, region.slotIndex, function(error, template) {
-            if (error) {
-               restoreAndFinish(false, { message: String(error.message || error), created: created });
-               return;
-            }
-            templates[templateKey] = template;
-            createRegion(region, template);
-         });
-      } catch (error) {
-         restoreAndFinish(false, { message: String(error.message || error), created: created });
-      }
-   }
-
-   processNext();
 }
 
 function handleRecordLauncherArrangement(request) {
    var specifications = request.params.regions || [];
    if (!specifications.length) throw new Error("At least one arrangement region is required.");
    if (specifications.length > 64) throw new Error("A maximum of 64 arrangement regions can be recorded at once.");
+   // The print reads slots 0-7 through the first scene window.
+   if (sceneBank.scrollPosition().get() !== 0) {
+      resetSceneWindow();
+      throw new Error("Bitwig's scene window was still scrolled from the previous request. Try again.");
+   }
 
    var trackPlans = {};
    var orderedTrackPlans = [];
+   var startPosition = Infinity;
    var endBeats = 0;
    for (var regionIndex = 0; regionIndex < specifications.length; regionIndex++) {
       var region = specifications[regionIndex];
@@ -1964,6 +2113,7 @@ function handleRecordLauncherArrangement(request) {
       }
       plan.intervals.push({ start: startBeats, end: startBeats + lengthBeats });
       endBeats = Math.max(endBeats, startBeats + lengthBeats);
+      startPosition = Math.min(startPosition, startBeats);
    }
 
    var events = [];
@@ -1996,52 +2146,83 @@ function handleRecordLauncherArrangement(request) {
       return a.type === "stop" ? -1 : 1;
    });
 
+   var spanBeats = endBeats - startPosition;
+   if (spanBeats > MAX_PRINT_SPAN_BEATS) {
+      throw new Error("The regions run from beat " + startPosition + " to beat " + endBeats + ", " + spanBeats +
+         " beats in one print. One print can cover at most " + MAX_PRINT_SPAN_BEATS + " beats; split it into smaller prints.");
+   }
+
    // Recording runs at an accelerated tempo; put the project's own tempo back
    // afterwards unless the caller asks for a specific one.
    var restoreTempo = request.params.restoreTempo === undefined || request.params.restoreTempo === null
       ? transport.tempo().value().getRaw()
       : Number(request.params.restoreTempo);
    if (!(restoreTempo >= 20 && restoreTempo <= 666)) throw new Error("Restore tempo must be between 20 and 666 BPM.");
-   var originalLoopEnabled = transport.isArrangerLoopEnabled().get();
-   var originalPosition = transport.getPosition().get();
+
+   // Everything the print changes is put back by restoreState, on success, on
+   // any error, and when the watchdog gives up on the request.
+   var saved = {
+      loopEnabled: transport.isArrangerLoopEnabled().get(),
+      position: transport.getPosition().get(),
+      arrangerOverdub: transport.isArrangerOverdubEnabled().get(),
+      launcherOverdub: transport.isClipLauncherOverdubEnabled().get(),
+      armedTracks: []
+   };
+   var trackCount = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   for (var armIndex = 0; armIndex < trackCount; armIndex++) {
+      var candidate = trackBank.getItemAt(armIndex);
+      if (candidate.exists().get() && candidate.arm().get()) saved.armedTracks.push(candidate);
+   }
    var acceleratedTempo = 666;
    var nextEvent = 0;
    var startTimestamp = Date.now();
    var completed = false;
+   var restored = false;
 
-   function fail(error) {
-      if (completed) return;
-      completed = true;
-      transport.stop();
-      transport.isArrangerRecordEnabled().set(false);
-      transport.isArrangerLoopEnabled().set(originalLoopEnabled);
-      transport.tempo().value().setRaw(restoreTempo);
-      transport.setPosition(originalPosition);
-      finish(request, false, { message: String(error.message || error), recordedIntervals: recordedIntervals });
-   }
-
-   function complete() {
-      if (completed) return;
-      completed = true;
+   function restoreState() {
+      if (restored) return;
+      restored = true;
       transport.stop();
       transport.isArrangerRecordEnabled().set(false);
       for (var planIndex = 0; planIndex < orderedTrackPlans.length; planIndex++) {
          orderedTrackPlans[planIndex].track.stop();
          orderedTrackPlans[planIndex].track.returnToArrangement();
       }
-      transport.isArrangerLoopEnabled().set(originalLoopEnabled);
+      transport.isArrangerLoopEnabled().set(saved.loopEnabled);
+      transport.isArrangerOverdubEnabled().set(saved.arrangerOverdub);
+      transport.isClipLauncherOverdubEnabled().set(saved.launcherOverdub);
+      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(true);
       transport.tempo().value().setRaw(restoreTempo);
-      transport.setPosition(originalPosition);
+      transport.setPosition(saved.position);
+      // Bitwig drops a playhead move made while the transport is still
+      // stopping, so move it again once the stop has landed.
+      host.scheduleTask(function() { transport.setPosition(saved.position); }, 200);
+   }
+   request.cleanup = restoreState;
+
+   function fail(error) {
+      if (completed) return;
+      completed = true;
+      restoreState();
+      finish(request, false, { message: String(error.message || error), recordedIntervals: recordedIntervals });
+   }
+
+   function complete() {
+      if (completed) return;
+      completed = true;
+      restoreState();
       later(450, function() {
          finish(request, true, {
             recorded: true,
             tracks: orderedTrackPlans.length,
             regionsRequested: specifications.length,
             mergedIntervals: recordedIntervals.length,
+            startBeats: startPosition,
             endBeats: endBeats,
             acceleratedTempo: acceleratedTempo,
             restoredTempo: transport.tempo().value().getRaw(),
             restoredPositionBeats: transport.getPosition().get(),
+            restoredArmedTracks: saved.armedTracks.length,
             durationMs: Date.now() - startTimestamp,
             intervals: recordedIntervals,
             projectModified: project.isModified().get(),
@@ -2053,23 +2234,28 @@ function handleRecordLauncherArrangement(request) {
    function runDueEvents(positionBeats) {
       while (nextEvent < events.length) {
          var event = events[nextEvent];
-         var leadBeats = event.beat === 0 ? 0 : 0.75;
+         var atStart = event.beat === startPosition;
+         var leadBeats = atStart ? 0 : 0.75;
          if (positionBeats < event.beat - leadBeats) break;
          if (event.type === "start") {
             event.plan.track.clipLauncherSlotBank().getItemAt(event.plan.slotIndex)
-               .launchWithOptions(event.beat === 0 ? "none" : "1", "from_start");
+               .launchWithOptions(atStart ? "none" : "1", "from_start");
          } else event.plan.track.stop();
          nextEvent++;
       }
    }
 
    function monitorRecording() {
+      if (completed || restored) return;
       try {
          var positionBeats = transport.getPosition().get();
          runDueEvents(positionBeats);
          if (positionBeats >= endBeats + 0.5) {
             complete();
             return;
+         }
+         if (!transport.isPlaying().get()) {
+            throw new Error("Bitwig's transport stopped at beat " + positionBeats + " before the print reached beat " + endBeats + ".");
          }
          if (Date.now() - startTimestamp > 115000) {
             throw new Error("Timed out while recording Launcher clips into the Arranger.");
@@ -2080,42 +2266,70 @@ function handleRecordLauncherArrangement(request) {
       }
    }
 
-   transport.stop();
-   transport.isArrangerRecordEnabled().set(false);
-   transport.isArrangerLoopEnabled().set(false);
-   for (var stopIndex = 0; stopIndex < orderedTrackPlans.length; stopIndex++) orderedTrackPlans[stopIndex].track.stop();
-   transport.tempo().value().setRaw(acceleratedTempo);
-   transport.setPosition(0);
-   jumpToBeginningAction.invoke();
+   function stillArmed() {
+      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) {
+         if (saved.armedTracks[armIndex].arm().get()) return true;
+      }
+      return false;
+   }
+
+   function moveToStart() {
+      transport.setPosition(startPosition);
+      if (startPosition === 0) jumpToBeginningAction.invoke();
+   }
+
+   try {
+      transport.stop();
+      transport.isArrangerRecordEnabled().set(false);
+      transport.isArrangerLoopEnabled().set(false);
+      transport.isArrangerOverdubEnabled().set(false);
+      transport.isClipLauncherOverdubEnabled().set(false);
+      for (var unarmIndex = 0; unarmIndex < saved.armedTracks.length; unarmIndex++) saved.armedTracks[unarmIndex].arm().set(false);
+      for (var stopIndex = 0; stopIndex < orderedTrackPlans.length; stopIndex++) orderedTrackPlans[stopIndex].track.stop();
+      transport.tempo().value().setRaw(acceleratedTempo);
+      moveToStart();
+   } catch (error) {
+      fail(error);
+      return;
+   }
    var preparationAttempts = 0;
+   function retryOr(message) {
+      if (preparationAttempts++ < 30) {
+         later(100, beginWhenReady);
+         return;
+      }
+      throw new Error(message);
+   }
    function beginWhenReady() {
+      if (completed || restored) return;
       try {
          if (Math.abs(transport.tempo().value().getRaw() - acceleratedTempo) > 0.01) {
-            if (preparationAttempts++ < 30) {
-               later(100, beginWhenReady);
-               return;
-            }
-            throw new Error("Bitwig did not verify the temporary recording tempo.");
+            retryOr("Bitwig did not verify the temporary recording tempo.");
+            return;
          }
          if (transport.isArrangerLoopEnabled().get()) {
             transport.isArrangerLoopEnabled().set(false);
-            if (preparationAttempts++ < 30) {
-               later(100, beginWhenReady);
-               return;
-            }
-            throw new Error("Bitwig did not disable the Arranger loop for recording.");
+            retryOr("Bitwig did not disable the Arranger loop for recording.");
+            return;
          }
-         if (Math.abs(transport.getPosition().get()) > 0.01) {
-            transport.setPosition(0);
-            jumpToBeginningAction.invoke();
-            if (preparationAttempts++ < 30) {
-               later(100, beginWhenReady);
-               return;
-            }
-            throw new Error("Bitwig did not verify the arrangement start position.");
+         if (transport.isArrangerOverdubEnabled().get() || transport.isClipLauncherOverdubEnabled().get()) {
+            transport.isArrangerOverdubEnabled().set(false);
+            transport.isClipLauncherOverdubEnabled().set(false);
+            retryOr("Bitwig did not turn off overdub for recording.");
+            return;
+         }
+         if (stillArmed()) {
+            for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(false);
+            retryOr("Bitwig did not disarm the armed tracks for recording.");
+            return;
+         }
+         if (Math.abs(transport.getPosition().get() - startPosition) > 0.01) {
+            moveToStart();
+            retryOr("Bitwig did not verify the recording start position at beat " + startPosition + ".");
+            return;
          }
          transport.isArrangerRecordEnabled().set(true);
-         runDueEvents(0);
+         runDueEvents(startPosition);
          transport.play();
          later(180, function() {
             if (!transport.isPlaying().get()) {
@@ -2134,25 +2348,42 @@ function handleRecordLauncherArrangement(request) {
 function handleListClips(request) {
    var params = request.params;
    var track = requireTrack(params);
-   var slots = track.clipLauncherSlotBank();
-   later(120, function() {
-      var clips = [];
-      for (var slotIndex = 0; slotIndex < MAX_SCENES; slotIndex++) {
-         var snapshot = clipSnapshot(slots.getItemAt(slotIndex), slotIndex);
-         if (snapshot.hasContent) clips.push(snapshot);
+   var sceneCount = Math.min(sceneBank.itemCount().get(), MAX_SCENE_SLOTS);
+   var clips = [];
+   function readWindow(windowStart) {
+      if (windowStart >= sceneCount) {
+         finish(request, true, {
+            track: { index: params.trackIndex, name: params.trackName },
+            sceneCount: sceneBank.itemCount().get(),
+            clips: clips
+         });
+         return;
       }
-      finish(request, true, { track: { index: params.trackIndex, name: params.trackName }, clips: clips });
+      withSceneSlot(request, track, windowStart, function(firstSlot, firstLocal) {
+         later(60, function() {
+            var slots = track.clipLauncherSlotBank();
+            var position = windowStart - firstLocal;
+            var end = Math.min(position + MAX_SCENES, sceneCount);
+            for (var slotIndex = windowStart; slotIndex < end; slotIndex++) {
+               var snapshot = clipSnapshot(slots.getItemAt(slotIndex - position), slotIndex);
+               if (snapshot.hasContent) clips.push(snapshot);
+            }
+            readWindow(end);
+         });
+      });
+   }
+   later(120, function() {
+      readWindow(0);
    });
 }
 
 function handleLaunchScene(request) {
-   var slotIndex = Number(request.params.slotIndex);
-   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-      throw new Error("Scene slot must be between 0 and " + (MAX_SCENES - 1) + ".");
-   }
-   sceneBank.getItemAt(slotIndex).launchWithOptions("none", "from_start");
-   later(180, function() {
-      finish(request, true, { slotIndex: slotIndex, transport: readTransport() });
+   var slotIndex = requireSlotIndex(request.params.slotIndex, "Scene");
+   withSceneSlot(request, null, slotIndex, function(scene) {
+      scene.launchWithOptions("none", "from_start");
+      later(180, function() {
+         finish(request, true, { slotIndex: slotIndex, transport: readTransport() });
+      });
    });
 }
 
@@ -2169,7 +2400,8 @@ function dispatch(request) {
             projectModified: project.isModified().get(),
             transport: readTransport(),
             selectedTrack: cursorTrack.exists().get() ? { name: cursorTrack.name().get(), position: cursorTrack.position().get() } : null,
-            selectedDevice: cursorDevice.exists().get() ? { name: cursorDevice.name().get(), position: cursorDevice.position().get() } : null
+            selectedDevice: cursorDevice.exists().get() ? { name: cursorDevice.name().get(), position: cursorDevice.position().get() } : null,
+            audioEngineActive: application.hasActiveEngine().get()
          });
          return;
       case "transport":
@@ -2177,37 +2409,6 @@ function dispatch(request) {
          return;
       case "cue_markers":
          handleCueMarkers(request);
-         return;
-      case "audio_engine":
-         var engineAction = String(params.action || "status");
-         if (engineAction === "activate") application.activateEngine();
-         else if (engineAction === "deactivate") application.deactivateEngine();
-         else if (engineAction !== "status") throw new Error("Audio engine action must be status, activate, or deactivate.");
-         later(engineAction === "status" ? 1 : 1000, function() {
-            finish(request, true, { active: application.hasActiveEngine().get(), action: engineAction });
-         });
-         return;
-      case "restart_bridge":
-         finish(request, true, { restarting: true, version: CONTROL_DECK_VERSION });
-         later(100, function() { host.restart(); });
-         return;
-      case "find_actions":
-         var actionQuery = String(params.query || "").toLowerCase();
-         var allActions = application.getActions();
-         var matchingActions = [];
-         for (var actionIndex = 0; actionIndex < allActions.length; actionIndex++) {
-            var candidate = allActions[actionIndex];
-            var candidateText = (candidate.getId() + " " + candidate.getName() + " " + candidate.getMenuItemText()).toLowerCase();
-            if (!actionQuery || candidateText.indexOf(actionQuery) !== -1) {
-               matchingActions.push({
-                  id: candidate.getId(),
-                  name: candidate.getName(),
-                  menuItemText: candidate.getMenuItemText()
-               });
-               if (matchingActions.length >= 100) break;
-            }
-         }
-         finish(request, true, { query: actionQuery, actions: matchingActions });
          return;
       case "invoke_action":
          var requestedActionId = String(params.actionId || "");
@@ -2221,21 +2422,10 @@ function dispatch(request) {
             finish(request, true, { id: requestedActionId, invoked: true });
          });
          return;
-      case "selection_state":
-         finish(request, true, {
-            device: cursorDevice.exists().get() ? deviceSnapshot(cursorDevice, cursorDevice.position().get()) : null,
-            slotNames: arrayCopy(cursorDevice.slotNames().get()),
-            cursorSlot: {
-               exists: cursorDeviceSlot.exists().get(),
-               name: cursorDeviceSlot.name().get()
-            },
-            nested: listNestedDevicesNow()
-         });
-         return;
       case "list_tracks":
          finish(request, true, listTracks());
          return;
-      case "list_actions":
+      case "find_actions":
          var actionQuery = normalizeText(params.query || "");
          var availableActions = application.getActions();
          var matchingActions = [];
@@ -2253,7 +2443,7 @@ function dispatch(request) {
             query: String(params.query || ""),
             totalActions: availableActions.length,
             matched: matchingActions.length,
-            actions: matchingActions.slice(0, 500)
+            actions: matchingActions.slice(0, 100)
          });
          return;
       case "track_meters":
@@ -2276,12 +2466,7 @@ function dispatch(request) {
          return;
       case "delete_track":
          var track = requireTrack(params);
-         var deletedTrack = trackSnapshot(track, Number(params.trackIndex));
-         var trackCountBefore = trackBank.itemCount().get();
-         track.deleteObject();
-         later(250, function() {
-            finish(request, true, { deleted: deletedTrack, verifiedCount: trackBank.itemCount().get(), previousCount: trackCountBefore });
-         });
+         deleteAndVerify(request, trackBank, MAX_TRACKS, Number(params.trackIndex), track, trackSnapshot(track, Number(params.trackIndex)), "track");
          return;
       case "list_devices":
          selectTrack(request, params, function() {
@@ -2336,12 +2521,7 @@ function dispatch(request) {
          selectTrack(request, params, function() {
             try {
                var device = requireDevice(params);
-               var deleted = deviceSnapshot(device, Number(params.deviceIndex));
-               var before = deviceBank.itemCount().get();
-               device.deleteObject();
-               later(250, function() {
-                  finish(request, true, { deleted: deleted, previousCount: before, verifiedCount: deviceBank.itemCount().get() });
-               });
+               deleteAndVerify(request, deviceBank, MAX_DEVICES, Number(params.deviceIndex), device, deviceSnapshot(device, Number(params.deviceIndex)), "device");
             } catch (error) {
                finish(request, false, { message: String(error.message || error) });
             }
@@ -2639,8 +2819,23 @@ function observeTrackMeter(track, index) {
    track.addVuMeterObserver(128, -1, true, function(value) {
       var numeric = Number(value || 0);
       trackMeterLatest[index] = numeric;
-      if (numeric > Number(trackMeterMaximum[index] || 0)) trackMeterMaximum[index] = numeric;
+      var name = track.name().get();
+      if (trackMeterOwner[index] !== name) {
+         trackMeterOwner[index] = name;
+         trackMeterMaximum[index] = numeric;
+      } else if (numeric > Number(trackMeterMaximum[index] || 0)) trackMeterMaximum[index] = numeric;
    });
+}
+
+// The maximum only counts when it was measured on the track that sits at this
+// position now. After tracks are added, deleted or moved, it starts again from
+// the latest level.
+function meterMaximumFor(index, name) {
+   if (trackMeterOwner[index] !== name) {
+      trackMeterOwner[index] = name;
+      trackMeterMaximum[index] = Number(trackMeterLatest[index] || 0);
+   }
+   return Number(trackMeterMaximum[index] || 0);
 }
 
 function markDevice(device) {
@@ -2676,14 +2871,16 @@ function init() {
    transport = host.createTransport();
    trackBank = host.createMainTrackBank(MAX_TRACKS, 0, MAX_SCENES);
    sceneBank = trackBank.sceneBank();
+   interested(sceneBank.itemCount());
+   interested(sceneBank.scrollPosition());
    cursorTrack = host.createCursorTrack("CONTROL_DECK_TRACK_CURSOR", "Control Deck Track Cursor", 0, MAX_SCENES, true);
    cursorDevice = cursorTrack.createCursorDevice();
    cursorDeviceSlot = cursorDevice.getCursorSlot();
    cursorRemoteControlsPage = cursorDevice.createCursorRemoteControlsPage(8);
    nestedDeviceBank = cursorDeviceSlot.createDeviceBank(MAX_DEVICES);
+   effectTrackBank = host.createEffectTrackBank(MAX_EFFECT_TRACKS, 0);
    deviceBank = cursorTrack.createDeviceBank(MAX_DEVICES);
    launcherClip = host.createLauncherCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
-   arrangerClip = host.createArrangerCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
    launcherClip.addNoteStepObserver(onLauncherNoteStep);
 
    interested(application.projectName());
@@ -2733,16 +2930,12 @@ function init() {
    interested(launcherClip.getPlayStart());
    interested(launcherClip.getPlayStop());
    interested(launcherClip.isLoopEnabled());
-   interested(arrangerClip.exists());
-   interested(arrangerClip.getLoopStart());
-   interested(arrangerClip.getLoopLength());
-   interested(arrangerClip.getPlayStart());
-   interested(arrangerClip.getPlayStop());
-   interested(arrangerClip.isLoopEnabled());
 
    interested(transport.isPlaying());
    interested(transport.isArrangerRecordEnabled());
    interested(transport.isArrangerLoopEnabled());
+   interested(transport.isArrangerOverdubEnabled());
+   interested(transport.isClipLauncherOverdubEnabled());
    interested(transport.tempo().value());
    interested(transport.tempo().value().displayedValue());
    interested(transport.getPosition());
@@ -2760,6 +2953,12 @@ function init() {
    for (var nestedIndex = 0; nestedIndex < MAX_DEVICES; nestedIndex++) markDevice(nestedDeviceBank.getItemAt(nestedIndex));
    for (var cueMarkerIndex = 0; cueMarkerIndex < MAX_CUE_MARKERS; cueMarkerIndex++) {
       markCueMarker(cueMarkerBank.getItemAt(cueMarkerIndex));
+   }
+   interested(effectTrackBank.itemCount());
+   for (var effectIndex = 0; effectIndex < MAX_EFFECT_TRACKS; effectIndex++) {
+      var effectTrack = effectTrackBank.getItemAt(effectIndex);
+      interested(effectTrack.exists());
+      interested(effectTrack.name());
    }
 
    cursorDevice.addDirectParameterIdObserver(function(ids) {
@@ -2782,13 +2981,6 @@ function init() {
       directDisplays[String(id)] = String(value);
    });
    saveToLibraryAction = application.getAction("add_to_library");
-   focusArrangerAction = application.getAction("focus_or_toggle_arranger");
-   focusClipLauncherAction = application.getAction("focus_or_toggle_clip_launcher");
-   deselectAllAction = application.getAction("Unselect All");
-   copyAction = application.getAction("Copy");
-   pasteAction = application.getAction("Paste");
-   pasteReferenceAction = application.getAction("Paste Reference");
-   copyLauncherToArrangerAction = application.getAction("copy_launcher_clips_to_arranger");
    jumpToBeginningAction = application.getAction("jump_to_beginning_of_arrangement");
    popupBrowser = host.createPopupBrowser();
    resultColumn = popupBrowser.resultsColumn();

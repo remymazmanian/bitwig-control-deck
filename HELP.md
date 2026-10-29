@@ -114,28 +114,28 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 
 ### Status & session
 
-- **bitwig_status** — Check Control Deck Bridge, Bitwig, the current project, transport, and current selection.
-- **bitwig_actions** — Search Bitwig Studio's native action registry by action id, name, or menu text.
+- **bitwig_status** — Check Control Deck Bridge, Bitwig, the current project, transport, current selection, and whether Bitwig's audio engine is on.
+- **bitwig_actions** — Search Bitwig Studio's native action registry by action id, name, or menu text. Matching ignores case, returns up to 100 actions, and reports how many matched in total.
 - **bitwig_invoke_action** — Invoke one exact Bitwig action id previously returned by `bitwig_actions`.
 - **bitwig_transport** — Read or control Bitwig transport. Tempo changes are read back before success is reported.
-- **bitwig_track_meters** — Read peak signal activity captured for every track, or reset the captured maxima before a playback test.
+- **bitwig_track_meters** — Read peak signal activity captured for every track, or reset the captured maxima before a playback test. When tracks are added, deleted or moved, a track that lands on a new position starts a fresh maximum instead of inheriting the previous track's peak.
 
 ### Tracks
 
 - **bitwig_tracks** — List tracks with exact names, positions, safety references, types, and states.
-- **bitwig_create_track** — Create an empty track without opening the Browser or loading any preset.
+- **bitwig_create_track** — Create an empty track without opening the Browser or loading any preset. The bridge finds the track Bitwig added by comparing the track list before and after, then names it and checks the name. Effect tracks are reported with their `effectTrackIndex` in the effect track list. With 128 main tracks (or 32 effect tracks) it refuses before creating anything.
 - **bitwig_set_track_mix** — Set exact mixer values on one verified track and read the resulting state back.
 - **bitwig_rename_track** — Rename one verified track without changing its routing.
-- **bitwig_delete_track** — Delete one exact track; the supplied name must still match, preventing index-drift mistakes.
+- **bitwig_delete_track** — Delete one exact track; the supplied name must still match, preventing index-drift mistakes. It succeeds only after Bitwig's track list shows the track gone and every other track in its place. Deleting a group also removes its tracks, and the reply's `removedCount` says how many went.
 
 ### Clips & arrangement
 
-- **bitwig_clips** — List populated launcher clips for one exact track.
+- **bitwig_clips** — List populated launcher clips in every scene for one exact track, with the project's scene count. Clip and scene tools take slot and scene numbers from 0 to 1023, and creating a clip one slot past the last scene adds a new scene for it.
 - **bitwig_clip_notes** — Read every note in one launcher clip (beat, pitch, velocity, duration, channel, muted). Notes are read from Bitwig's step grid, so a note that starts between steps comes back at the step it starts in; the reply says `quantized: true`.
 - **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content. Every note is then read back from the clip; a missing, changed, muted, or extra note fails the call and names the first five differences.
-- **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions and restoring the project tempo afterward.
+- **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions. Recording starts at the earliest region and runs at 666 BPM, and one print covers at most 1024 beats. While it records, armed tracks are disarmed and Arranger and Launcher overdub are off, so nothing else gets recorded. Afterwards, and also when the print fails or times out, Bitwig gets back its tempo, loop, overdub, track arms and playhead position.
 - **bitwig_launch_scene** — Launch one scene immediately and from the start across all tracks.
-- **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification.
+- **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification. New markers are added at the playhead and moved into place, so playback does not jump. If the transport is stopped on an existing marker, the playhead is moved aside for a moment and put back.
 
 ### Devices
 
@@ -146,7 +146,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 - **bitwig_insert_clap_device** — Insert a CLAP plug-in directly by its stable ID, bypassing Browser filters and redundant-format hiding.
 - **bitwig_nest_device** — Move one verified top-level device into another device's native nested chain and verify both chains.
 - **bitwig_save_device_preset** — Open Bitwig's native Save-to-Library flow for one verified device, without mouse automation.
-- **bitwig_delete_device** — Delete one exact device; both track and device names must still match.
+- **bitwig_delete_device** — Delete one exact device; both track and device names must still match. It succeeds only after Bitwig's device list shows the device gone and every other device in its place.
 - **bitwig_open_device_window** — Open the native window for one exact device or plug-in.
 
 ### Samples
@@ -195,13 +195,23 @@ Ports (all loopback-only): `50701/udp` bridge, `50702/tcp` status API, `50703/tc
 
 **Everything broke after moving or renaming the folder.** Expected — services pin absolute paths. Run setup from the new location (it detects the move and refreshes), and re-register the MCP server in your agent since its path changed too.
 
+**A tool says several tracks "are all named" the same.** Bitwig's controller API version 18 gives tracks no permanent ID, so Control Deck finds a track by its position and checks its name. When two tracks share a name, that check can't catch a track that moved, so tools refuse them. `bitwig_tracks` lists the clashing names under `duplicateNames`. Give each track a unique name, in Bitwig or with `bitwig_rename_track`, which still works on duplicates and refuses a name another track already has.
+
 **Everything broke after upgrading Node.** The launch agents pin the Node binary that ran setup. Re-run setup with the new Node and they're re-pinned.
 
 **"MIDI helper skipped" during setup.** Apple's command line tools are missing. Run `xcode-select --install`, accept the popup, run setup again. Or skip it forever and add the controller in Bitwig manually — the helper is only for auto-detection.
 
+**Save to Library opened, but nothing was saved.** Bitwig's API can open the dialog but can't type into it, so `bitwig_save_device_preset` leaves the dialog open for you to name and save. With `confirm: true` it presses Enter to accept the prefilled name, and only when the same device is still selected. Compare `presetNameBefore` and `presetNameAfter` in the reply, then check the Library.
+
+**The selected track flickers while a tool runs.** Device, sample and clip tools work through Bitwig's selection, so they select their track for a moment. When the tool finishes, Control Deck selects your track again, and your device too when the tool worked on that same track. Selection is left alone when your track moved or was deleted, and when you had the master, an effect track or a track past the first 128 selected. `bitwig_create_track` still leaves the new track selected.
+
 **macOS refuses to open the installer.** Downloaded, non-notarized scripts need a one-time right-click → **Open**. Everything after that first launch is normal.
 
 **Plug-in list is empty or stale.** Use the reindex button on the deck, or `npm run index:plugins`.
+
+**"Bitwig's answer is … bytes, over the 60000-byte limit for one reply."** Each answer from Bitwig travels in one local network message, capped at 60,000 bytes. Ask for less at once: a smaller `limit`, an `offset`, or a `query` filter.
+
+**"Bitwig could not send the … reply."** macOS refused the message from Bitwig, usually because it was larger than the system allows for one message. Ask for less at once, as above. The Controller Script Console shows the same error with the size.
 
 **An agent connects but tools time out.** Bitwig must be open with the controller enabled; requests need a live bridge. `bitwig_status` is the cheapest way to check what the agent sees.
 
