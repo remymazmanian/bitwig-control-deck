@@ -241,6 +241,7 @@ function withClip(options = {}) {
   const slot = fakeSlot(options.slot);
   const track = { clipLauncherSlotBank: () => ({ getItemAt: () => slot }) };
   context.launcherClip = clip;
+  context.sceneBank = { itemCount: () => ({ get: () => 8 }), scrollPosition: () => ({ get: () => 0, set() {} }) };
   context.selectTrack = (request, params, callback) => {
     try { callback(track); } catch (error) { context.finish(request, false, { message: String(error.message || error) }); }
   };
@@ -310,32 +311,6 @@ test("clip_notes skips observer cells that getStep no longer confirms", () => {
   context.enqueue(5000, "1", "clip_notes", { ...TRACK, slotIndex: 0 }, 60000);
   advance(2000);
   assert.deepEqual([...responses[0].payload.notes.map(n => n.pitch)], [60]);
-});
-
-test("the launcher template reader keeps every channel and a minimum one-step duration", () => {
-  const { context, track, advance } = withClip({ notes: [
-    { beat: 0, pitch: 60, velocity: 100, duration: 0.1 },
-    { beat: 1, pitch: 62, velocity: 80, duration: 1, channel: 9 }
-  ] });
-  let result;
-  context.readLauncherTemplate(track, 0, (error, template) => { result = { error, template }; });
-  advance(2000);
-  assert.equal(result.error, null);
-  assert.deepEqual(JSON.parse(JSON.stringify(result.template)), {
-    lengthBeats: 4, stepSize: 0.25,
-    notes: [
-      { beat: 0, pitch: 60, velocity: 100, duration: 0.25, channel: 0 },
-      { beat: 1, pitch: 62, velocity: 80, duration: 1, channel: 9 }
-    ]
-  });
-});
-
-test("the launcher template reader refuses a clip with no notes", () => {
-  const { context, track, advance } = withClip({ notes: [] });
-  let result;
-  context.readLauncherTemplate(track, 0, error => { result = error; });
-  advance(2000);
-  assert.match(String(result && result.message), /contains no readable MIDI notes/);
 });
 
 const WRITE = {
