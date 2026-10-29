@@ -135,7 +135,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 - **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content. Every note is then read back from the clip; a missing, changed, muted, or extra note fails the call and names the first five differences.
 - **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions. Recording starts at the earliest region and runs at 666 BPM, and one print covers at most 1024 beats. While it records, armed tracks are disarmed and Arranger and Launcher overdub are off, so nothing else gets recorded. Afterwards, and also when the print fails or times out, Bitwig gets back its tempo, loop, overdub, track arms and playhead position.
 - **bitwig_launch_scene** — Launch one scene immediately and from the start across all tracks.
-- **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification.
+- **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification. New markers are added at the playhead and moved into place, so playback does not jump. If the transport is stopped on an existing marker, the playhead is moved aside for a moment and put back.
 
 ### Devices
 

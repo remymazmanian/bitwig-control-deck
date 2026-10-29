@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `bitwig_cue_markers` upsert moved the playhead to a spot past the last marker for every new marker and then jumped back, which was audible during playback. New markers are now added at the current playhead and moved into place, so the playhead stays where it is. The only exception is a stopped transport with a marker already under the playhead: the bridge then moves the playhead aside for the add and puts it back before replying.
 - Launcher tools are no longer limited to the first eight scenes. `bitwig_create_note_clip`, `bitwig_clip_notes` and `bitwig_launch_scene` accept slots up to 1023 and scroll Bitwig's scene window to reach them, and `bitwig_clips` lists clips in every scene.
 - `bitwig_create_note_clip` can add a clip one slot past the last scene; Bitwig creates the scene for it.
 - `bitwig_arrange_launcher_clips` disarms armed tracks and turns off Arranger and Launcher overdub while it records, so live input and overdub no longer land in the print. Both are put back afterwards.
