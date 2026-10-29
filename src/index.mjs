@@ -203,7 +203,7 @@ server.registerTool("bitwig_create_note_clip", {
   description: "Create or replace a launcher MIDI clip on one exact instrument track, write its complete note content, and read every note back; any missing, changed, or extra note fails the call.",
   inputSchema: {
     ...trackSelector,
-    slotIndex: z.number().int().min(0).max(7).default(0),
+    slotIndex: z.number().int().min(0).max(1023).default(0).describe("Launcher slot (scene) index; one past the last scene adds a new scene"),
     clipName: z.string().min(1).max(120),
     lengthBeats: z.number().int().min(1).max(512),
     stepSize: z.number().min(0.03125).max(4).default(0.25),
@@ -219,11 +219,11 @@ server.registerTool("bitwig_create_note_clip", {
 }, async args => call("create_note_clip", args, 120000));
 
 server.registerTool("bitwig_arrange_launcher_clips", {
-  description: "Record existing launcher clips into Bitwig's Arranger across exact requested beat regions, merging contiguous regions and restoring the project tempo afterward.",
+  description: "Record existing launcher clips into Bitwig's Arranger across exact requested beat regions, merging contiguous regions. Recording starts at the earliest region and covers at most 1024 beats. Armed tracks are disarmed and overdub is off while it records; tempo, loop, overdub, arms and playhead are restored afterward, also on failure.",
   inputSchema: {
     regions: z.array(z.object({
       ...trackSelector,
-      slotIndex: z.number().int().min(0).max(7).default(0),
+      slotIndex: z.number().int().min(0).max(7).default(0).describe("Launcher slot 0-7; the print reads only the first eight scenes"),
       startBeats: z.number().nonnegative(),
       lengthBeats: z.number().int().min(1).max(512),
       clipName: z.string().min(1).max(120)
@@ -233,22 +233,22 @@ server.registerTool("bitwig_arrange_launcher_clips", {
 }, async args => call("arrange_launcher_clips", args, 120000));
 
 server.registerTool("bitwig_clips", {
-  description: "List populated launcher clips for one exact track.",
+  description: "List populated launcher clips in every scene for one exact track.",
   inputSchema: trackSelector
-}, async args => call("list_clips", args));
+}, async args => call("list_clips", args, 60000));
 
 server.registerTool("bitwig_clip_notes", {
   description: "Read every note in one launcher clip on one exact track, read from Bitwig's step grid. Notes that start between steps come back at the step they start in (quantized: true).",
   inputSchema: {
     ...trackSelector,
-    slotIndex: z.number().int().min(0).max(7).default(0),
+    slotIndex: z.number().int().min(0).max(1023).default(0),
     stepSize: z.number().min(0.03125).max(4).default(0.25).describe("Grid resolution in beats used to read note starts")
   }
 }, async args => call("clip_notes", args, 120000));
 
 server.registerTool("bitwig_launch_scene", {
   description: "Launch one Control Deck scene immediately and from the start across all tracks.",
-  inputSchema: { slotIndex: z.number().int().min(0).max(7).default(0) }
+  inputSchema: { slotIndex: z.number().int().min(0).max(1023).default(0) }
 }, async args => call("launch_scene", args));
 
 server.registerTool("bitwig_find_devices", {

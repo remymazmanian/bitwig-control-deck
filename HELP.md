@@ -130,12 +130,12 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 
 ### Clips & arrangement
 
-- **bitwig_clips** — List populated launcher clips for one exact track.
+- **bitwig_clips** — List populated launcher clips in every scene for one exact track, with the project's scene count. Clip and scene tools take slot and scene numbers from 0 to 1023, and creating a clip one slot past the last scene adds a new scene for it.
 - **bitwig_clip_notes** — Read every note in one launcher clip (beat, pitch, velocity, duration, channel, muted). Notes are read from Bitwig's step grid, so a note that starts between steps comes back at the step it starts in; the reply says `quantized: true`.
 - **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content. Every note is then read back from the clip; a missing, changed, muted, or extra note fails the call and names the first five differences.
-- **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions and restoring the project tempo afterward.
+- **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions. Recording starts at the earliest region and runs at 666 BPM, and one print covers at most 1024 beats. While it records, armed tracks are disarmed and Arranger and Launcher overdub are off, so nothing else gets recorded. Afterwards, and also when the print fails or times out, Bitwig gets back its tempo, loop, overdub, track arms and playhead position.
 - **bitwig_launch_scene** — Launch one scene immediately and from the start across all tracks.
-- **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification.
+- **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification. New markers are added at the playhead and moved into place, so playback does not jump. If the transport is stopped on an existing marker, the playhead is moved aside for a moment and put back.
 
 ### Devices
 
@@ -202,6 +202,10 @@ Ports (all loopback-only): `50701/udp` bridge, `50702/tcp` status API, `50703/tc
 **macOS refuses to open the installer.** Downloaded, non-notarized scripts need a one-time right-click → **Open**. Everything after that first launch is normal.
 
 **Plug-in list is empty or stale.** Use the reindex button on the deck, or `npm run index:plugins`.
+
+**"Bitwig's answer is … bytes, over the 60000-byte limit for one reply."** Each answer from Bitwig travels in one local network message, capped at 60,000 bytes. Ask for less at once: a smaller `limit`, an `offset`, or a `query` filter.
+
+**"Bitwig could not send the … reply."** macOS refused the message from Bitwig, usually because it was larger than the system allows for one message. Ask for less at once, as above. The Controller Script Console shows the same error with the size.
 
 **An agent connects but tools time out.** Bitwig must be open with the controller enabled; requests need a live bridge. `bitwig_status` is the cheapest way to check what the agent sees.
 
