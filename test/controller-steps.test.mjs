@@ -38,13 +38,3 @@ test("steps scheduled outside any request still run", () => {
   advance(20);
   assert.equal(ran, true);
 });
-
-test("restart_bridge still restarts after answering", () => {
-  const { context, host, responses, advance } = loadController();
-  let restarted = false;
-  host.restart = () => { restarted = true; };
-  context.enqueue(5000, "1", "restart_bridge", {}, 5000);
-  advance(500);
-  assert.equal(responses[0].ok, true);
-  assert.equal(restarted, true);
-});

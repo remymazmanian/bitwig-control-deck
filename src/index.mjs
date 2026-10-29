@@ -53,7 +53,7 @@ async function call(method, params = {}, timeoutMs) {
 }
 
 server.registerTool("bitwig_status", {
-  description: "Check Control Deck Bridge, Bitwig, the current project, transport, and current selection.",
+  description: "Check Control Deck Bridge, Bitwig, the current project, transport, current selection, and whether Bitwig's audio engine is on.",
   inputSchema: {}
 }, async () => call("status"));
 

@@ -4,6 +4,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `bitwig_actions` now matches case-insensitively after trimming the query, and reports `totalActions` and `matched` alongside up to 100 actions.
+- `bitwig_status` reports `audioEngineActive`.
+
+### Removed
+
+- The bridge methods `audio_engine`, `restart_bridge`, `selection_state` and `list_actions`. No MCP tool, dashboard view or script used them. `list_actions` was a second copy of the action search and is now the only one, behind `bitwig_actions`. Engine on/off switching could cut audio during a session, so only the read-only engine state remains, in `bitwig_status`. `restart_bridge` could not help a stuck bridge because it waited in the same request queue, and `selection_state` repeated what `bitwig_status` and `bitwig_devices` already report.
 ### Fixed
 
 - Device, sample and clip tools selected their track (and device) in Bitwig and left it that way, so your selection moved every time an agent worked. The selection you had now comes back when the tool finishes, whether it succeeded or failed.

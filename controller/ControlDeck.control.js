@@ -2381,7 +2381,8 @@ function dispatch(request) {
             projectModified: project.isModified().get(),
             transport: readTransport(),
             selectedTrack: cursorTrack.exists().get() ? { name: cursorTrack.name().get(), position: cursorTrack.position().get() } : null,
-            selectedDevice: cursorDevice.exists().get() ? { name: cursorDevice.name().get(), position: cursorDevice.position().get() } : null
+            selectedDevice: cursorDevice.exists().get() ? { name: cursorDevice.name().get(), position: cursorDevice.position().get() } : null,
+            audioEngineActive: application.hasActiveEngine().get()
          });
          return;
       case "transport":
@@ -2389,38 +2390,6 @@ function dispatch(request) {
          return;
       case "cue_markers":
          handleCueMarkers(request);
-         return;
-      case "audio_engine":
-         var engineAction = String(params.action || "status");
-         if (engineAction === "activate") application.activateEngine();
-         else if (engineAction === "deactivate") application.deactivateEngine();
-         else if (engineAction !== "status") throw new Error("Audio engine action must be status, activate, or deactivate.");
-         later(engineAction === "status" ? 1 : 1000, function() {
-            finish(request, true, { active: application.hasActiveEngine().get(), action: engineAction });
-         });
-         return;
-      case "restart_bridge":
-         finish(request, true, { restarting: true, version: CONTROL_DECK_VERSION });
-         // Runs after the request is answered, so it can't go through later().
-         host.scheduleTask(function() { host.restart(); }, 100);
-         return;
-      case "find_actions":
-         var actionQuery = String(params.query || "").toLowerCase();
-         var allActions = application.getActions();
-         var matchingActions = [];
-         for (var actionIndex = 0; actionIndex < allActions.length; actionIndex++) {
-            var candidate = allActions[actionIndex];
-            var candidateText = (candidate.getId() + " " + candidate.getName() + " " + candidate.getMenuItemText()).toLowerCase();
-            if (!actionQuery || candidateText.indexOf(actionQuery) !== -1) {
-               matchingActions.push({
-                  id: candidate.getId(),
-                  name: candidate.getName(),
-                  menuItemText: candidate.getMenuItemText()
-               });
-               if (matchingActions.length >= 100) break;
-            }
-         }
-         finish(request, true, { query: actionQuery, actions: matchingActions });
          return;
       case "invoke_action":
          var requestedActionId = String(params.actionId || "");
@@ -2434,21 +2403,10 @@ function dispatch(request) {
             finish(request, true, { id: requestedActionId, invoked: true });
          });
          return;
-      case "selection_state":
-         finish(request, true, {
-            device: cursorDevice.exists().get() ? deviceSnapshot(cursorDevice, cursorDevice.position().get()) : null,
-            slotNames: arrayCopy(cursorDevice.slotNames().get()),
-            cursorSlot: {
-               exists: cursorDeviceSlot.exists().get(),
-               name: cursorDeviceSlot.name().get()
-            },
-            nested: listNestedDevicesNow()
-         });
-         return;
       case "list_tracks":
          finish(request, true, listTracks());
          return;
-      case "list_actions":
+      case "find_actions":
          var actionQuery = normalizeText(params.query || "");
          var availableActions = application.getActions();
          var matchingActions = [];
@@ -2466,7 +2424,7 @@ function dispatch(request) {
             query: String(params.query || ""),
             totalActions: availableActions.length,
             matched: matchingActions.length,
-            actions: matchingActions.slice(0, 500)
+            actions: matchingActions.slice(0, 100)
          });
          return;
       case "track_meters":
