@@ -51,6 +51,11 @@ export default function ConnectPage() {
             Protocol — cloud coding agents or a fully local LLM — can drive Bitwig through
             the verified bridge on this Mac.
           </p>
+          <p>
+            It works with Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI,
+            Windsurf, Cline, and GitHub Copilot in VS Code. It works with any
+            MCP-compatible agent that can run a local server.
+          </p>
         </div>
         <div className="settings-summary">
           <span>SERVER COMMAND</span>
@@ -62,12 +67,14 @@ export default function ConnectPage() {
       <div className="settings-layout">
         <nav className="settings-index" aria-label="Agent guides">
           <a href="#basics">The basics</a>
-          <a href="#claude-code">Claude Code</a>
           <a href="#claude-desktop">Claude Desktop</a>
-          <a href="#codex">Codex</a>
-          <a href="#editors">Editors</a>
-          <a href="#gemini">Gemini CLI</a>
+          <a href="#claude-code">Claude Code</a>
+          <a href="#cursor">Cursor</a>
+          <a href="#codex">OpenAI Codex</a>
           <a href="#grok">Grok CLI</a>
+          <a href="#windsurf">Windsurf</a>
+          <a href="#cline">Cline</a>
+          <a href="#vscode">Copilot in VS Code</a>
           <a href="#local-llm">Local LLMs</a>
           <a href="#generic">Anything else</a>
           <a href="#remote">Remote connectors</a>
@@ -96,6 +103,19 @@ export default function ConnectPage() {
           </GuideSection>
 
           <GuideSection
+            id="claude-desktop"
+            eyebrow="ANTHROPIC · APP"
+            title="Claude Desktop"
+            description="Add the server to the desktop app's local MCP config."
+          >
+            <p className="guide-text">
+              Settings → Developer → Edit Config opens
+              <code> claude_desktop_config.json</code>. Merge this in and restart the app:
+            </p>
+            <CodeBlock label="claude_desktop_config.json" code={mcpServersJson} />
+          </GuideSection>
+
+          <GuideSection
             id="claude-code"
             eyebrow="ANTHROPIC · CLI"
             title="Claude Code"
@@ -113,24 +133,22 @@ export default function ConnectPage() {
           </GuideSection>
 
           <GuideSection
-            id="claude-desktop"
-            eyebrow="ANTHROPIC · APP"
-            title="Claude Desktop"
-            description="Add the server to the desktop app's local MCP config."
+            id="cursor"
+            eyebrow="EDITOR"
+            title="Cursor"
+            description="Cursor reads the standard mcpServers block."
           >
-            <p className="guide-text">
-              Settings → Developer → Edit Config opens
-              <code> claude_desktop_config.json</code>. Merge this in and restart the app:
-            </p>
-            <CodeBlock label="claude_desktop_config.json" code={mcpServersJson} />
+            <CodeBlock label="~/.cursor/mcp.json (or .cursor/mcp.json per project)" code={mcpServersJson} />
           </GuideSection>
 
           <GuideSection
             id="codex"
             eyebrow="OPENAI"
-            title="Codex CLI & Desktop"
-            description="Codex reads MCP servers from its TOML config."
+            title="OpenAI Codex"
+            description="The Codex CLI, IDE extension and desktop app share one MCP setting."
           >
+            <CodeBlock label="Terminal" code={`codex mcp add bitwig -- node ${p}/src/index.mjs`} />
+            <p className="guide-text">Or add it to Codex's TOML config yourself:</p>
             <CodeBlock
               label="~/.codex/config.toml"
               code={`[mcp_servers.bitwig]
@@ -138,57 +156,71 @@ command = "node"
 args = ["${p}/src/index.mjs"]
 startup_timeout_sec = 15.0`}
             />
-            <p className="guide-text">
-              Recent Codex CLI builds can also do this in one line:
-              <code> codex mcp add bitwig -- node {p}/src/index.mjs</code>.
-            </p>
-          </GuideSection>
-
-          <GuideSection
-            id="editors"
-            eyebrow="IDE AGENTS"
-            title="Cursor, VS Code, Windsurf"
-            description="The same stdio server, declared in each editor's MCP file."
-          >
-            <CodeBlock label="Cursor — ~/.cursor/mcp.json (or .cursor/mcp.json per project)" code={mcpServersJson} />
-            <CodeBlock
-              label="VS Code (Copilot agent mode) — .vscode/mcp.json"
-              code={`{
-  "servers": {
-    "bitwig": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["${p}/src/index.mjs"]
-    }
-  }
-}`}
-            />
-            <CodeBlock label="Windsurf — ~/.codeium/windsurf/mcp_config.json" code={mcpServersJson} />
-          </GuideSection>
-
-          <GuideSection
-            id="gemini"
-            eyebrow="GOOGLE"
-            title="Gemini CLI"
-            description="Gemini CLI uses the standard mcpServers block in its settings file."
-          >
-            <CodeBlock label="~/.gemini/settings.json" code={mcpServersJson} />
           </GuideSection>
 
           <GuideSection
             id="grok"
             eyebrow="XAI"
             title="Grok CLI"
-            description="Grok's terminal agent takes the standard mcpServers block in its settings file."
+            description="One command registers the server in Grok's config."
           >
-            <CodeBlock label="~/.grok/settings.json" code={mcpServersJson} />
+            <CodeBlock label="Terminal" code={`grok mcp add bitwig -- node ${p}/src/index.mjs`} />
             <p className="guide-text">
-              Restart the CLI after saving, then ask Grok to list the available MCP tools to
-              confirm the <code>bitwig</code> server loaded. Grok CLI is evolving quickly —
-              if your build has an <code>mcp add</code> command or names the settings file
-              differently, the values it needs are always the same two:
-              command <code>node</code>, argument <code>{p}/src/index.mjs</code>.
+              This saves it to <code>~/.grok/config.toml</code>. To write it by hand instead:
             </p>
+            <CodeBlock
+              label="~/.grok/config.toml"
+              code={`[mcp_servers.bitwig]
+command = "node"
+args = ["${p}/src/index.mjs"]`}
+            />
+            <p className="guide-text">
+              Check it with <code>grok mcp list</code>, or <code>grok mcp doctor bitwig</code> if
+              it does not connect.
+            </p>
+          </GuideSection>
+
+          <GuideSection
+            id="windsurf"
+            eyebrow="EDITOR"
+            title="Windsurf"
+            description="Windsurf's Cascade agent reads the standard mcpServers block."
+          >
+            <p className="guide-text">
+              In the Cascade panel, open the <code>...</code> menu and choose
+              <strong> Open MCP config file</strong>. Merge this in and save:
+            </p>
+            <CodeBlock label="mcp_config.json" code={mcpServersJson} />
+          </GuideSection>
+
+          <GuideSection
+            id="cline"
+            eyebrow="EDITOR · CLI"
+            title="Cline"
+            description="Cline reads the standard mcpServers block."
+          >
+            <p className="guide-text">
+              Click the MCP Servers icon in the Cline panel, open <strong>Configure</strong>,
+              then <strong>Configure MCP Servers</strong>. Merge this in and save:
+            </p>
+            <CodeBlock label="cline_mcp_settings.json" code={mcpServersJson} />
+            <p className="guide-text">The Cline CLI can add it in one line:</p>
+            <CodeBlock label="Terminal" code={`cline mcp add bitwig --yes -- node ${p}/src/index.mjs`} />
+          </GuideSection>
+
+          <GuideSection
+            id="vscode"
+            eyebrow="GITHUB · EDITOR"
+            title="GitHub Copilot in VS Code"
+            description="Add the server to your Copilot user config."
+          >
+            <p className="guide-text">
+              Run <strong>MCP: Add Server</strong> from the Command Palette, choose
+              <strong> Command (stdio)</strong>, enter the server command above, name it
+              <code> bitwig</code>, then pick <strong>Global</strong> → <strong>Copilot Global</strong>.
+              Or merge this into the file it writes:
+            </p>
+            <CodeBlock label="~/.copilot/mcp-config.json" code={mcpServersJson} />
           </GuideSection>
 
           <GuideSection
@@ -218,7 +250,7 @@ mcphost --config config.json -m ollama:qwen3`}
             id="generic"
             eyebrow="EVERYTHING ELSE"
             title="Any other MCP client"
-            description="Zed, Cline, Roo Code, JetBrains, custom agents…"
+            description="Any MCP-compatible agent that can run a local server."
           >
             <p className="guide-text">
               If a tool supports MCP, it accepts a stdio server defined by a command plus
