@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { BrandHeader } from "../brand-header";
 import {
   DEFAULT_PREFERENCES,
@@ -22,9 +22,13 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [connection, setConnection] = useState<ConnectionState>("idle");
 
-  useEffect(() => {
-    if (ready) setDraft(preferences);
-  }, [ready, preferences]);
+  // Reset the draft whenever the saved preferences change (first load, save, reset).
+  const [draftSource, setDraftSource] = useState<DeckPreferences | null>(null);
+  const currentSource = ready ? preferences : null;
+  if (currentSource !== draftSource) {
+    setDraftSource(currentSource);
+    if (currentSource) setDraft(currentSource);
+  }
 
   function update<K extends keyof DeckPreferences>(key: K, value: DeckPreferences[K]) {
     setDraft(current => ({ ...current, [key]: value }));

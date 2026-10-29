@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 export const FORMATS = ["ALL", "VST3", "VST2", "AU", "CLAP"] as const;
 export type PluginFormat = (typeof FORMATS)[number];
@@ -74,24 +74,49 @@ export function resetPreferences() {
   window.dispatchEvent(new CustomEvent(PREFERENCES_EVENT, { detail: DEFAULT_PREFERENCES }));
 }
 
+// Preferences live in localStorage, so the hook reads them as an external
+// store. The snapshot is cached by the raw stored string so React sees a
+// stable object until the stored value actually changes.
+let cachedRaw: string | null | undefined;
+let cachedPreferences: DeckPreferences = DEFAULT_PREFERENCES;
+
+function readStoredRaw(): string | null {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function getPreferencesSnapshot(): DeckPreferences {
+  const raw = readStoredRaw();
+  if (raw !== cachedRaw) {
+    cachedRaw = raw;
+    cachedPreferences = raw === null ? DEFAULT_PREFERENCES : readPreferences();
+  }
+  return cachedPreferences;
+}
+
+function getServerPreferences(): DeckPreferences {
+  return DEFAULT_PREFERENCES;
+}
+
+function subscribePreferences(onChange: () => void) {
+  window.addEventListener(PREFERENCES_EVENT, onChange);
+  return () => window.removeEventListener(PREFERENCES_EVENT, onChange);
+}
+
+function subscribeNothing() {
+  return () => {};
+}
+
 export function useDeckPreferences() {
-  const [preferences, setPreferences] = useState<DeckPreferences>(DEFAULT_PREFERENCES);
-  const [ready, setReady] = useState(false);
+  const preferences = useSyncExternalStore(subscribePreferences, getPreferencesSnapshot, getServerPreferences);
+  const ready = useSyncExternalStore(subscribeNothing, () => true, () => false);
 
   useEffect(() => {
-    const saved = readPreferences();
-    setPreferences(saved);
-    applyPreferences(saved);
-    setReady(true);
+    applyPreferences(preferences);
+  }, [preferences]);
 
-    const onChange = (event: Event) => {
-      const next = (event as CustomEvent<DeckPreferences>).detail || readPreferences();
-      setPreferences(next);
-      applyPreferences(next);
-    };
-    window.addEventListener(PREFERENCES_EVENT, onChange);
-    return () => window.removeEventListener(PREFERENCES_EVENT, onChange);
-  }, []);
-
-  return { preferences, setPreferences, ready };
+  return { preferences, ready };
 }

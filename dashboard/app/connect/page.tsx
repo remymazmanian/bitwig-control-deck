@@ -148,7 +148,7 @@ export default function ConnectPage() {
             description="The Codex CLI, IDE extension and desktop app share one MCP setting."
           >
             <CodeBlock label="Terminal" code={`codex mcp add bitwig -- node ${p}/src/index.mjs`} />
-            <p className="guide-text">Or add it to Codex's TOML config yourself:</p>
+            <p className="guide-text">Or add it to Codex’s TOML config yourself:</p>
             <CodeBlock
               label="~/.codex/config.toml"
               code={`[mcp_servers.bitwig]
@@ -273,7 +273,7 @@ mcphost --config config.json -m ollama:qwen3`}
           >
             <p className="guide-text">
               “Connectors” in claude.ai and ChatGPT are <em>remote</em> MCP servers: the
-              vendor's cloud connects to a public HTTPS endpoint. Control Deck is
+              vendor’s cloud connects to a public HTTPS endpoint. Control Deck is
               deliberately the opposite — a local stdio process, loopback-only, useless to
               anyone who is not on this Mac. A connector cannot reach{" "}
               <code>127.0.0.1</code> on your machine, so out of the box the answer is no.

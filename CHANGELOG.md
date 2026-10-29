@@ -11,6 +11,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Updated zod to 4.6.7 in the MCP server, which fixes GHSA-mrhx-c7xc-m3w5. Tool inputs validate the same way as before.
 - Updated zod to 4.6.7 in the dashboard's lint tooling, which fixes GHSA-mrhx-c7xc-m3w5 there too.
 
+### Fixed
+
+- Fixed the dashboard lint errors. Saved preferences are now read as an external store, and the Settings draft and default format follow saved changes without effects. The dashboard behaves the same as before.
+
 ## [1.2.0] - 2026-10-28
 
 Makes the bridge safer and more exact: it ignores requests with the wrong auth token, track and device tools check Bitwig's lists before reporting success, launcher tools reach every scene, and your selection and transport settings come back after a tool runs. Tested live in Bitwig Studio 6.1.3.
