@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Tools identified a track by its index and checked its name, but two tracks with the same name could pass that check after the tracks moved. Track tools now refuse a track whose name another track shares and ask for a rename. `bitwig_rename_track` still works on duplicates, refuses a name that another track already has, and `bitwig_tracks` reports clashing names under `duplicateNames`. Permanent track IDs need controller API 20 and are planned for a later version.
 - `bitwig_create_track` created the track first and only then checked the 128-track limit, so a 129th track was created and reported as a failure. It now refuses before creating anything.
 - `bitwig_create_track` assumed the new track was the last one in the main track list. Effect tracks never appear there, so creating one always reported an error after the track was made, and a track Bitwig placed elsewhere could leave the wrong track renamed. The bridge now compares the track list (or the effect track list) before and after, names the track that was added, and checks the name took. If the new track cannot be told apart from a neighbour with the same name, it is left unnamed and the tool says so.
 - `bitwig_delete_track` and `bitwig_delete_device` reported success without checking anything. They now succeed only once Bitwig's list shows the item gone and the rest in their original order. A deleted group reports how many tracks went with it.

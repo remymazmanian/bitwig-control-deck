@@ -13,7 +13,7 @@ const logFile = new URL("control-deck.jsonl", logDirectory);
 
 const trackSelector = {
   trackIndex: z.number().int().nonnegative().describe("Zero-based track index returned by bitwig_tracks"),
-  trackName: z.string().min(1).describe("Exact track name returned by bitwig_tracks; used as a safety check")
+  trackName: z.string().min(1).describe("Exact track name returned by bitwig_tracks; used as a safety check. Tracks that share a name are refused until renamed")
 };
 const deviceSelector = {
   ...trackSelector,
