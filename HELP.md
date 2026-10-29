@@ -123,10 +123,10 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 ### Tracks
 
 - **bitwig_tracks** — List tracks with exact names, positions, safety references, types, and states.
-- **bitwig_create_track** — Create an empty track without opening the Browser or loading any preset.
+- **bitwig_create_track** — Create an empty track without opening the Browser or loading any preset. The bridge finds the track Bitwig added by comparing the track list before and after, then names it and checks the name. Effect tracks are reported with their `effectTrackIndex` in the effect track list. With 128 main tracks (or 32 effect tracks) it refuses before creating anything.
 - **bitwig_set_track_mix** — Set exact mixer values on one verified track and read the resulting state back.
 - **bitwig_rename_track** — Rename one verified track without changing its routing.
-- **bitwig_delete_track** — Delete one exact track; the supplied name must still match, preventing index-drift mistakes.
+- **bitwig_delete_track** — Delete one exact track; the supplied name must still match, preventing index-drift mistakes. It succeeds only after Bitwig's track list shows the track gone and every other track in its place. Deleting a group also removes its tracks, and the reply's `removedCount` says how many went.
 
 ### Clips & arrangement
 
@@ -146,7 +146,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 - **bitwig_insert_clap_device** — Insert a CLAP plug-in directly by its stable ID, bypassing Browser filters and redundant-format hiding.
 - **bitwig_nest_device** — Move one verified top-level device into another device's native nested chain and verify both chains.
 - **bitwig_save_device_preset** — Open Bitwig's native Save-to-Library flow for one verified device, without mouse automation.
-- **bitwig_delete_device** — Delete one exact device; both track and device names must still match.
+- **bitwig_delete_device** — Delete one exact device; both track and device names must still match. It succeeds only after Bitwig's device list shows the device gone and every other device in its place.
 - **bitwig_open_device_window** — Open the native window for one exact device or plug-in.
 
 ### Samples

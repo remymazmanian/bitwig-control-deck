@@ -141,7 +141,7 @@ server.registerTool("bitwig_refresh_plugin_index", {
 });
 
 server.registerTool("bitwig_create_track", {
-  description: "Create an empty Bitwig track without opening the Browser or loading any preset.",
+  description: "Create an empty Bitwig track without opening the Browser or loading any preset. Effect tracks live in a separate list and are returned with effectTrackIndex.",
   inputSchema: {
     kind: z.enum(["instrument", "audio", "effect"]),
     name: z.string().min(1).max(120)

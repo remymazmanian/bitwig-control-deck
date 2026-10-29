@@ -25,6 +25,7 @@ var MAX_CUE_MARKERS = 256;
 var MAX_PRINT_SPAN_BEATS = 1024;
 var BROWSER_PAGE = 128;
 var MAX_BROWSER_RESULTS = 16384;
+var MAX_EFFECT_TRACKS = 32;
 var CLIP_GRID_WIDTH = 256;
 var CLIP_GRID_HEIGHT = 128;
 // Largest reply sent back in one datagram. Mirrors MAX_PACKET_BYTES in
@@ -37,6 +38,7 @@ var cueMarkerBank;
 var project;
 var transport;
 var trackBank;
+var effectTrackBank;
 var cursorTrack;
 var trackIsCursor = [];
 var deviceBank;
@@ -1314,30 +1316,144 @@ function handleCueMarkers(request) {
    later(180, processNext);
 }
 
+// Names of the tracks or devices a bank shows, in order, for before/after
+// comparisons around a create or delete.
+function bankNames(bank, limit) {
+   var count = Math.min(bank.itemCount().get(), limit);
+   var names = [];
+   for (var index = 0; index < count; index++) {
+      var item = bank.getItemAt(index);
+      names.push(item.exists().get() ? String(item.name().get()) : null);
+   }
+   return names;
+}
+
+// Where `after` equals `before` with one item inserted, returns that item's
+// index. Returns -1 when the lists differ in some other way, and null when the
+// new item's name matches a neighbour so its position cannot be told apart.
+function insertedIndex(before, after) {
+   if (after.length !== before.length + 1) return -1;
+   var prefix = 0;
+   while (prefix < before.length && before[prefix] === after[prefix]) prefix++;
+   var suffix = 0;
+   while (suffix < before.length && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+   if (prefix + suffix < before.length) return -1;
+   return prefix + suffix === before.length ? prefix : null;
+}
+
+// Where the bank lost `removed` items starting at `index` and everything else
+// kept its order, returns true. Only the names the bank shows are compared, so
+// this also works when the project has more items than the bank can reach.
+function isRemovedRun(before, after, index, removed) {
+   if (removed < 1 || index + removed > before.length) return false;
+   for (var i = 0; i < index; i++) {
+      if (before[i] !== after[i]) return false;
+   }
+   for (var j = index; j < after.length && j + removed < before.length; j++) {
+      if (before[j + removed] !== after[j]) return false;
+   }
+   return true;
+}
+
 function handleCreateTrack(request) {
    var params = request.params;
-   var before = trackBank.itemCount().get();
+   var effect = params.kind === "effect";
+   if (params.kind !== "instrument" && params.kind !== "audio" && !effect) {
+      throw new Error("Track kind must be instrument, audio, or effect.");
+   }
+   var bank = effect ? effectTrackBank : trackBank;
+   var limit = effect ? MAX_EFFECT_TRACKS : MAX_TRACKS;
+   var before = bankNames(bank, limit);
+   if (bank.itemCount().get() >= limit) {
+      throw new Error("The project already has " + bank.itemCount().get() + " " + (effect ? "effect" : "main") +
+         " tracks, and Control Deck can reach only the first " + limit + ". No track was created.");
+   }
    if (params.kind === "instrument") application.createInstrumentTrack(-1);
    else if (params.kind === "audio") application.createAudioTrack(-1);
-   else if (params.kind === "effect") application.createEffectTrack(-1);
-   else throw new Error("Track kind must be instrument, audio, or effect.");
+   else application.createEffectTrack(-1);
 
-   later(350, function() {
+   var attempt = 0;
+   function locate() {
       try {
-         var after = trackBank.itemCount().get();
-         if (after <= before || before >= MAX_TRACKS) {
-            throw new Error("Bitwig did not expose the new track in the main track list.");
+         var after = bankNames(bank, limit);
+         var index = insertedIndex(before, after);
+         if (index !== -1 && index !== null) {
+            nameTrack(index);
+            return;
          }
-         var track = trackBank.getItemAt(before);
-         track.setName(String(params.name));
-         track.selectInMixer();
-         later(140, function() {
-            finish(request, true, { created: trackSnapshot(track, before), emptyDeviceChain: true, presetLoaded: false });
-         });
+         if (attempt++ < 20) {
+            later(100, locate);
+            return;
+         }
+         if (index === -1) {
+            throw new Error("Bitwig did not show exactly one new track in the " + (effect ? "effect" : "main") +
+               " track list, so the new track was left unnamed. Check the project with bitwig_tracks.");
+         }
+         throw new Error("Bitwig gave the new track the same name as the track next to it, " +
+            "so the bridge cannot tell which one is new. It was left unnamed.");
       } catch (error) {
          finish(request, false, { message: String(error.message || error) });
       }
-   });
+   }
+
+   function nameTrack(index) {
+      var track = bank.getItemAt(index);
+      track.setName(String(params.name));
+      if (!effect) track.selectInMixer();
+      var nameAttempt = 0;
+      function verifyName() {
+         try {
+            if (track.name().get() !== String(params.name)) {
+               if (nameAttempt++ < 10) {
+                  later(100, verifyName);
+                  return;
+               }
+               throw new Error("Bitwig created the track at index " + index + " but did not apply the name ‘" + params.name + "’.");
+            }
+            var created = effect ? { index: index, name: track.name().get() } : trackSnapshot(track, index);
+            created.kind = params.kind;
+            if (effect) created.effectTrackIndex = index;
+            finish(request, true, { created: created, emptyDeviceChain: true, presetLoaded: false });
+         } catch (error) {
+            finish(request, false, { message: String(error.message || error) });
+         }
+      }
+      later(140, verifyName);
+   }
+   later(200, locate);
+}
+
+// Deletes one track or device and checks Bitwig's list afterwards: the item
+// must be gone and everything else must still be in the same order.
+function deleteAndVerify(request, bank, limit, index, item, deleted, what) {
+   var before = bankNames(bank, limit);
+   var totalBefore = bank.itemCount().get();
+   item.deleteObject();
+   var attempt = 0;
+   function verify() {
+      try {
+         var after = bankNames(bank, limit);
+         var removed = totalBefore - bank.itemCount().get();
+         if (!isRemovedRun(before, after, index, removed)) {
+            if (attempt++ < 20) {
+               later(100, verify);
+               return;
+            }
+            finish(request, false, {
+               message: "Bitwig did not confirm that the " + what + " ‘" + deleted.name + "’ was removed and the rest left in place. Check it in Bitwig.",
+               previousCount: totalBefore,
+               verifiedCount: bank.itemCount().get()
+            });
+            return;
+         }
+         var payload = { deleted: deleted, previousCount: totalBefore, verifiedCount: totalBefore - removed, removedCount: removed };
+         if (removed > 1) payload.note = "Bitwig removed " + removed + " " + what + "s; a group takes its contents with it.";
+         finish(request, true, payload);
+      } catch (error) {
+         finish(request, false, { message: String(error.message || error) });
+      }
+   }
+   later(250, verify);
 }
 
 function markSlot(slot) {
@@ -2244,12 +2360,7 @@ function dispatch(request) {
          return;
       case "delete_track":
          var track = requireTrack(params);
-         var deletedTrack = trackSnapshot(track, Number(params.trackIndex));
-         var trackCountBefore = trackBank.itemCount().get();
-         track.deleteObject();
-         later(250, function() {
-            finish(request, true, { deleted: deletedTrack, verifiedCount: trackBank.itemCount().get(), previousCount: trackCountBefore });
-         });
+         deleteAndVerify(request, trackBank, MAX_TRACKS, Number(params.trackIndex), track, trackSnapshot(track, Number(params.trackIndex)), "track");
          return;
       case "list_devices":
          selectTrack(request, params, function() {
@@ -2304,12 +2415,7 @@ function dispatch(request) {
          selectTrack(request, params, function() {
             try {
                var device = requireDevice(params);
-               var deleted = deviceSnapshot(device, Number(params.deviceIndex));
-               var before = deviceBank.itemCount().get();
-               device.deleteObject();
-               later(250, function() {
-                  finish(request, true, { deleted: deleted, previousCount: before, verifiedCount: deviceBank.itemCount().get() });
-               });
+               deleteAndVerify(request, deviceBank, MAX_DEVICES, Number(params.deviceIndex), device, deviceSnapshot(device, Number(params.deviceIndex)), "device");
             } catch (error) {
                finish(request, false, { message: String(error.message || error) });
             }
@@ -2651,6 +2757,7 @@ function init() {
    cursorDeviceSlot = cursorDevice.getCursorSlot();
    cursorRemoteControlsPage = cursorDevice.createCursorRemoteControlsPage(8);
    nestedDeviceBank = cursorDeviceSlot.createDeviceBank(MAX_DEVICES);
+   effectTrackBank = host.createEffectTrackBank(MAX_EFFECT_TRACKS, 0);
    deviceBank = cursorTrack.createDeviceBank(MAX_DEVICES);
    launcherClip = host.createLauncherCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
    launcherClip.addNoteStepObserver(onLauncherNoteStep);
@@ -2725,6 +2832,12 @@ function init() {
    for (var nestedIndex = 0; nestedIndex < MAX_DEVICES; nestedIndex++) markDevice(nestedDeviceBank.getItemAt(nestedIndex));
    for (var cueMarkerIndex = 0; cueMarkerIndex < MAX_CUE_MARKERS; cueMarkerIndex++) {
       markCueMarker(cueMarkerBank.getItemAt(cueMarkerIndex));
+   }
+   interested(effectTrackBank.itemCount());
+   for (var effectIndex = 0; effectIndex < MAX_EFFECT_TRACKS; effectIndex++) {
+      var effectTrack = effectTrackBank.getItemAt(effectIndex);
+      interested(effectTrack.exists());
+      interested(effectTrack.name());
    }
 
    cursorDevice.addDirectParameterIdObserver(function(ids) {
