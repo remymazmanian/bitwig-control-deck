@@ -4,6 +4,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-28
+
+Makes the bridge safer and more exact: it ignores requests with the wrong auth token, track and device tools check Bitwig's lists before reporting success, launcher tools reach every scene, and your selection and transport settings come back after a tool runs. Tested live in Bitwig Studio 6.1.3.
+
 ### Security
 
 - The bridge no longer replies to requests with the wrong auth token, including from its error path. It shows a popup the first time and logs the 1st and every 100th ignored request.
@@ -98,7 +102,8 @@ First release of Bitwig Control Deck, a local MCP bridge that lets an AI agent c
 - Local dashboard at `http://127.0.0.1:50703` showing bridge health, the current session, loaded devices and a searchable inventory of installed VST3, VST2, Audio Unit and CLAP plug-ins. Its Connect page has copy-paste setup guides for Claude Code, Codex, Cursor, VS Code, Gemini CLI, local LLM setups and other MCP clients.
 - Local operation: the status service and dashboard listen on this Mac only, and every request to the Bitwig bridge must carry a secret generated for your install.
 
-https://github.com/remymazmanian/bitwig-control-deck/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/remymazmanian/bitwig-control-deck/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.2.0
 [1.1.0]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.1.0
 [1.0.2]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.0.2
 [1.0.1]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.0.1
