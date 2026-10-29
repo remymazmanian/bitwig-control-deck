@@ -66,6 +66,12 @@ function timeLabel(value: string | null | undefined) {
   }).format(new Date(value));
 }
 
+async function fetchSnapshot(apiBase: string): Promise<Snapshot> {
+  const response = await fetch(`${apiBase}/snapshot`, { cache: "no-store" });
+  if (!response.ok) throw new Error("Snapshot unavailable");
+  return response.json();
+}
+
 export default function Home() {
   const { preferences, ready } = useDeckPreferences();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -76,22 +82,29 @@ export default function Home() {
   const [reindexing, setReindexing] = useState(false);
   const [serviceError, setServiceError] = useState(false);
 
-  useEffect(() => {
-    if (ready) setFormat(preferences.defaultFormat);
-  }, [ready, preferences.defaultFormat]);
+  // Apply the saved default format once preferences load, and again if it changes.
+  const [formatSource, setFormatSource] = useState<PluginFormat | null>(null);
+  const currentFormatSource = ready ? preferences.defaultFormat : null;
+  if (currentFormatSource !== formatSource) {
+    setFormatSource(currentFormatSource);
+    if (currentFormatSource) setFormat(currentFormatSource);
+  }
 
-  const loadSnapshot = useCallback(async () => {
-    try {
-      const response = await fetch(`${preferences.apiBase}/snapshot`, { cache: "no-store" });
-      if (!response.ok) throw new Error("Snapshot unavailable");
-      setSnapshot(await response.json());
-      setServiceError(false);
-    } catch {
-      setServiceError(true);
-    } finally {
-      setLoading(false);
-    }
-  }, [preferences.apiBase]);
+  const loadSnapshot = useCallback(
+    () =>
+      fetchSnapshot(preferences.apiBase).then(
+        next => {
+          setSnapshot(next);
+          setServiceError(false);
+          setLoading(false);
+        },
+        () => {
+          setServiceError(true);
+          setLoading(false);
+        }
+      ),
+    [preferences.apiBase]
+  );
 
   const loadPlugins = useCallback(async (search: string, selectedFormat: string) => {
     try {

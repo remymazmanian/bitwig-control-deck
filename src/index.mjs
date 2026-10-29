@@ -276,7 +276,7 @@ server.registerTool("bitwig_insert_stock_device", {
   description: "Insert a stock Bitwig device by its stable UUID, optionally immediately before one verified device. This supports valid note-processing positions that Bitwig's end-of-chain Browser omits.",
   inputSchema: {
     ...trackSelector,
-    bitwigId: z.string().uuid().describe("Stable Bitwig device UUID"),
+    bitwigId: z.string().guid().describe("Stable Bitwig device UUID"),
     beforeDeviceIndex: z.number().int().nonnegative().optional().describe("Optional zero-based target device index"),
     beforeDeviceName: z.string().min(1).optional().describe("Exact target device name; required with beforeDeviceIndex as a safety check")
   }
