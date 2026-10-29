@@ -1,12 +1,14 @@
 # Bitwig Control Deck
 
-Tell an AI what to change in Bitwig Studio. Control Deck does it on your Mac, then checks Bitwig actually did it.
+Tell an SI what to change in Bitwig Studio. Control Deck does it on your Mac, then checks Bitwig actually did it.
 
 **Docs, demo & setup guide:** [remymazmanian.com/bitwig-control-deck/](https://remymazmanian.com/bitwig-control-deck/)
 
 ![Control Deck dashboard](docs/dashboard.png)
 
-Bitwig Control Deck is a local [MCP](https://modelcontextprotocol.io) bridge for Bitwig Studio. It gives any MCP client — Claude Code, Claude Desktop, Codex, or anything else that speaks MCP — exact, read-back-verified control of Bitwig tracks, devices, transport, native devices, and third-party plug-in parameters, plus a local status dashboard.
+Bitwig Control Deck is a local [MCP](https://modelcontextprotocol.io) bridge for Bitwig Studio. It gives your agent exact, read-back-verified control of Bitwig tracks, devices, transport, native devices, and third-party plug-in parameters, plus a local status dashboard.
+
+It works with Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, and GitHub Copilot in VS Code. It works with any MCP-compatible agent that can run a local server.
 
 Everything runs on your machine and binds only to loopback addresses. Nothing is published or exposed to the network.
 
@@ -59,7 +61,7 @@ Full documentation — component descriptions, Bitwig setup, the complete MCP to
 2. **Download Control Deck** — use GitHub's green **Code → Download ZIP** button, unzip it, and move the folder somewhere permanent, like your home folder. Don't leave it in Downloads — the installer pins services to the folder's location and will ask you to move it.
 3. **Run the installer** — right-click `Install Control Deck.command` and choose **Open** (macOS requires the right-click the first time for downloaded files). It installs everything, starts the background services, and opens the connection guide when it's done. It's safe to run again at any time.
 4. **Enable the controller in Bitwig** — Settings → Controllers → confirm "Control Deck Bridge" is listed and enabled.
-5. **Connect your AI agent** — the guide that opened ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste instructions for every client.
+5. **Connect your SI agent** — the guide that opened ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste instructions for every client.
 
 ### Developer setup
 
@@ -83,11 +85,13 @@ Then add the MCP server to your client. For example, for Claude Code:
 claude mcp add bitwig -- node /path/to/bitwig-control-deck/src/index.mjs
 ```
 
+Setup snippets for the other agents are in [HELP.md](HELP.md#setup-snippets).
+
 In Bitwig, open **Settings → Controllers** and confirm “Control Deck Bridge” is active.
 
 ### Connecting other agents
 
-The dashboard's **Connect** page ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste setup guides — rendered with your machine's real install path — for Claude Code, Claude Desktop, Codex, Cursor, VS Code, Windsurf, Gemini CLI, Grok CLI, fully local LLM harnesses (LM Studio, Ollama via mcphost), and any other MCP client, plus an honest discussion of what it would take (and cost, security-wise) to expose the bridge to remote connectors like claude.ai. The short version: any agent that can launch a stdio MCP server can drive Bitwig; remote cloud connectors are deliberately out of scope.
+The dashboard's **Connect** page ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste setup guides — rendered with your machine's real install path — for Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, GitHub Copilot in VS Code, fully local LLM harnesses (LM Studio, Ollama via mcphost), and any other MCP client, plus an honest discussion of what it would take (and cost, security-wise) to expose the bridge to remote connectors like claude.ai. The short version: any agent that can launch a stdio MCP server can drive Bitwig; remote cloud connectors are deliberately out of scope.
 
 ## Control Deck dashboard
 
