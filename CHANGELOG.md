@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Updated Next.js to 16.4.1, which fixes GHSA-2464-fhr4-w9xw, GHSA-673q-mjm6-r5xr and GHSA-p3m5-59mp-jv5r (CVE-2026-94482) in the dashboard.
 - Updated the MCP server's dependencies body-parser (2.4.0), fast-uri (3.1.9), ip-address (10.7.5) and qs (6.17.1), which fixes GHSA-27r3-jxmh-p828, GHSA-w74x-v6f9-j3xg, GHSA-xhq7-xmqj-769h, GHSA-wjr9-j795-jxcr, GHSA-333x-w4r6-6crp, GHSA-rxp7-6hxx-x8q5 and GHSA-6pq8-jhm2-2vcw.
 - Updated zod to 4.6.7 in the MCP server, which fixes GHSA-mrhx-c7xc-m3w5. Tool inputs validate the same way as before.
+- Updated zod to 4.6.7 in the dashboard's lint tooling, which fixes GHSA-mrhx-c7xc-m3w5 there too.
 
 ## [1.2.0] - 2026-10-28
 
