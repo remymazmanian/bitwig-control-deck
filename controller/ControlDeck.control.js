@@ -75,9 +75,12 @@ function interested(value) {
 
 // Every delayed step runs through here. An exception in a step used to leave the
 // bridge busy forever; now it fails the request that scheduled the step instead.
+// Steps of a request that already finished, failed or timed out are dropped, so
+// they can't keep changing Bitwig or schedule steps under the next request.
 function later(delay, callback) {
    var owner = currentRequest;
    host.scheduleTask(function() {
+      if (owner && owner.done) return;
       try {
          callback();
       } catch (error) {
@@ -2170,7 +2173,8 @@ function dispatch(request) {
          return;
       case "restart_bridge":
          finish(request, true, { restarting: true, version: CONTROL_DECK_VERSION });
-         later(100, function() { host.restart(); });
+         // Runs after the request is answered, so it can't go through later().
+         host.scheduleTask(function() { host.restart(); }, 100);
          return;
       case "find_actions":
          var actionQuery = String(params.query || "").toLowerCase();
