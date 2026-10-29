@@ -77,7 +77,7 @@ export class BitwigClient {
     const response = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Bitwig did not answer ${method} within ${timeoutMs} ms. Make sure Control Deck Bridge is enabled in Bitwig.`));
+        reject(new Error(`Bitwig did not answer ${method} within ${timeoutMs} ms. Make sure Control Deck Bridge is enabled in Bitwig. If it is, run "npm run setup" so the bridge and this client share the same auth token.`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
     });

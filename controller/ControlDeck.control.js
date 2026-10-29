@@ -535,6 +535,25 @@ function remoteControlsSnapshot() {
    };
 }
 
+var authFailureCount = 0;
+
+function isAuthorized(request) {
+   return !!request && typeof request === "object" && request.token === CONTROL_DECK_TOKEN;
+}
+
+// Packets with a wrong token get no reply, so nothing on the machine can use
+// the bridge to probe it. The first failure shows a popup, then the log notes
+// the 1st and every 100th failure so a stale client is easy to spot.
+function noteAuthFailure() {
+   authFailureCount += 1;
+   if (authFailureCount === 1) {
+      host.showPopupNotification("Control Deck Bridge ignored a request with the wrong auth token. Run `npm run setup` to reinstall the controller script.");
+   }
+   if (authFailureCount === 1 || authFailureCount % 100 === 0) {
+      host.errorln("Control Deck Bridge ignored " + authFailureCount + " request(s) with the wrong auth token.");
+   }
+}
+
 function encodeReply(id, ok, payload) {
    return encodeUtf8(JSON.stringify({
       protocol: CONTROL_DECK_PROTOCOL,
@@ -3035,14 +3054,14 @@ function init() {
              !isFinite(replyPort) || replyPort < 1024 || replyPort > 65535) {
             throw new Error("Malformed Control Deck packet");
          }
-         if (request.token !== CONTROL_DECK_TOKEN) {
-            respond(replyPort, request.id, false, { message: "Control Deck authentication failed." });
+         if (!isAuthorized(request)) {
+            noteAuthFailure();
             return;
          }
          enqueue(replyPort, String(request.id), String(request.method), request.params || {}, request.timeoutMs);
       } catch (error) {
          host.println("Control Deck request error: " + error);
-         if (request && request.id && request.replyPort) {
+         if (isAuthorized(request) && request.id && request.replyPort) {
             respond(request.replyPort, request.id, false, { message: "Invalid Control Deck request: " + error });
          }
       }

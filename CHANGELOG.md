@@ -4,6 +4,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- The bridge no longer replies to requests with the wrong auth token, including from its error path. It shows a popup the first time and logs the 1st and every 100th ignored request.
 ### Changed
 
 - `bitwig_actions` now matches case-insensitively after trimming the query, and reports `totalActions` and `matched` alongside up to 100 actions.

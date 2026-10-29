@@ -377,3 +377,18 @@ test("create_note_clip lists at most five differences and counts the rest", () =
   assert.match(response.payload.message, /does not match the 8 requested notes/);
   assert.match(response.payload.message, /; and 3 more\.$/);
 });
+
+test("requests with the wrong token get no reply and are counted", () => {
+  const { context } = loadController();
+  const popups = [];
+  const errors = [];
+  context.host.showPopupNotification = message => popups.push(message);
+  context.host.errorln = message => errors.push(message);
+  assert.equal(context.isAuthorized({ token: "wrong" }), false);
+  assert.equal(context.isAuthorized(null), false);
+  assert.equal(context.isAuthorized({ token: context.CONTROL_DECK_TOKEN }), true);
+  for (let i = 0; i < 100; i += 1) context.noteAuthFailure();
+  assert.equal(popups.length, 1);
+  assert.equal(errors.length, 2);
+  assert.match(errors[1], /ignored 100 request/);
+});
