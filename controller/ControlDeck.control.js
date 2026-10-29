@@ -24,6 +24,9 @@ var BROWSER_PAGE = 128;
 var MAX_BROWSER_RESULTS = 16384;
 var CLIP_GRID_WIDTH = 256;
 var CLIP_GRID_HEIGHT = 128;
+// Largest reply sent back in one datagram. Mirrors MAX_PACKET_BYTES in
+// src/bitwig-client.mjs, which reads replies on a 65536-byte socket buffer.
+var MAX_REPLY_BYTES = 60000;
 
 var application;
 var arranger;
@@ -70,9 +73,12 @@ function interested(value) {
 
 // Every delayed step runs through here. An exception in a step used to leave the
 // bridge busy forever; now it fails the request that scheduled the step instead.
+// Steps of a request that already finished, failed or timed out are dropped, so
+// they can't keep changing Bitwig or schedule steps under the next request.
 function later(delay, callback) {
    var owner = currentRequest;
    host.scheduleTask(function() {
+      if (owner && owner.done) return;
       try {
          callback();
       } catch (error) {
@@ -430,16 +436,41 @@ function remoteControlsSnapshot() {
    };
 }
 
-function respond(replyPort, id, ok, payload) {
+function encodeReply(id, ok, payload) {
+   return encodeUtf8(JSON.stringify({
+      protocol: CONTROL_DECK_PROTOCOL,
+      id: String(id),
+      ok: Boolean(ok),
+      payload: payload || {}
+   }));
+}
+
+// A reply has to fit in one datagram. An oversized reply is replaced by a short
+// error the client can show, and a failed send is logged as an error and
+// reported to the client with a short error reply when that still gets through.
+function respond(replyPort, id, ok, payload, method) {
+   var what = method ? "the " + method + " reply" : "the reply";
+   var bytes = encodeReply(id, ok, payload);
+   if (bytes.length > MAX_REPLY_BYTES) {
+      host.errorln("Control Deck: " + what + " is " + bytes.length + " bytes, over the " + MAX_REPLY_BYTES + "-byte limit.");
+      bytes = encodeReply(id, false, {
+         message: "Bitwig's answer is " + bytes.length + " bytes, over the " + MAX_REPLY_BYTES + "-byte limit for one reply. Ask for less, for example with a smaller limit, an offset or a query.",
+         replyBytes: bytes.length,
+         maxReplyBytes: MAX_REPLY_BYTES
+      });
+   }
    try {
-      host.sendDatagramPacket("127.0.0.1", Number(replyPort), encodeUtf8(JSON.stringify({
-         protocol: CONTROL_DECK_PROTOCOL,
-         id: String(id),
-         ok: Boolean(ok),
-         payload: payload || {}
-      })));
+      host.sendDatagramPacket("127.0.0.1", Number(replyPort), bytes);
    } catch (error) {
-      host.println("Control Deck response error: " + error);
+      host.errorln("Control Deck could not send " + what + " (" + bytes.length + " bytes): " + error);
+      try {
+         host.sendDatagramPacket("127.0.0.1", Number(replyPort), encodeReply(id, false, {
+            message: "Bitwig could not send " + what + " (" + bytes.length + " bytes): " + String(error.message || error),
+            replyBytes: bytes.length
+         }));
+      } catch (secondError) {
+         host.errorln("Control Deck could not send the error reply either: " + secondError);
+      }
    }
 }
 
@@ -455,7 +486,7 @@ function finish(request, ok, payload) {
       }
    }
    request.done = true;
-   respond(request.source, request.id, ok, payload);
+   respond(request.source, request.id, ok, payload, request.method);
    if (currentRequest === request) {
       currentRequest = null;
       requestBusy = false;
@@ -1993,7 +2024,8 @@ function dispatch(request) {
          return;
       case "restart_bridge":
          finish(request, true, { restarting: true, version: CONTROL_DECK_VERSION });
-         later(100, function() { host.restart(); });
+         // Runs after the request is answered, so it can't go through later().
+         host.scheduleTask(function() { host.restart(); }, 100);
          return;
       case "find_actions":
          var actionQuery = String(params.query || "").toLowerCase();
