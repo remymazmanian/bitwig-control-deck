@@ -25,7 +25,9 @@ Everything about installing, using, troubleshooting, and understanding Bitwig Co
 
 ## What Control Deck is
 
-Bitwig Control Deck lets an AI agent operate Bitwig Studio the way a careful engineer would: every action names its exact target, ambiguous requests are refused, and every change is read back from Bitwig before being reported as done. It speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), the open standard used by Claude Code, Claude Desktop, Codex, Cursor, Gemini CLI, and most other AI agents — including fully local LLM setups.
+Bitwig Control Deck lets an AI agent operate Bitwig Studio the way a careful engineer would: every action names its exact target, ambiguous requests are refused, and every change is read back from Bitwig before being reported as done. It speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), an open standard for connecting agents to tools.
+
+It works with Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, and GitHub Copilot in VS Code. It works with any MCP-compatible agent that can run a local server. That includes fully local LLM setups.
 
 It is not a remote-control surface, a preset manager, or a cloud service. It is a precision bridge between an agent's intent and Bitwig's controller API, plus a local dashboard for watching what's happening.
 
@@ -107,6 +109,64 @@ The **Connect page** (`http://127.0.0.1:50703/connect`) is the canonical guide, 
 - Bitwig must be open for tools to work; the agent config is one-time.
 
 Remote cloud connectors (claude.ai, ChatGPT) are deliberately unsupported — see the [FAQ](#faq).
+
+### Setup snippets
+
+Replace `/path/to/bitwig-control-deck` with your install folder. The server name `bitwig` is up to you.
+
+**Claude Code** — adds it for every project:
+
+```sh
+claude mcp add --scope user bitwig -- node /path/to/bitwig-control-deck/src/index.mjs
+```
+
+**OpenAI Codex** — the CLI, IDE extension and desktop app share this setting:
+
+```sh
+codex mcp add bitwig -- node /path/to/bitwig-control-deck/src/index.mjs
+```
+
+Or add it to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.bitwig]
+command = "node"
+args = ["/path/to/bitwig-control-deck/src/index.mjs"]
+```
+
+**Grok CLI** — saves it to `~/.grok/config.toml`:
+
+```sh
+grok mcp add bitwig -- node /path/to/bitwig-control-deck/src/index.mjs
+```
+
+**GitHub Copilot in VS Code** — adds it to your VS Code profile:
+
+```sh
+code --add-mcp '{"name":"bitwig","type":"stdio","command":"node","args":["/path/to/bitwig-control-deck/src/index.mjs"]}'
+```
+
+Or run **MCP: Add Server** from the Command Palette, choose **Command (stdio)** and enter `node /path/to/bitwig-control-deck/src/index.mjs`.
+
+**Claude Desktop, Cursor, Windsurf and Cline** use the standard `mcpServers` block:
+
+```json
+{
+  "mcpServers": {
+    "bitwig": {
+      "command": "node",
+      "args": ["/path/to/bitwig-control-deck/src/index.mjs"]
+    }
+  }
+}
+```
+
+Merge it into the file each one reads, then restart it or refresh its MCP list:
+
+- **Claude Desktop:** Settings → Developer → Edit Config opens `~/Library/Application Support/Claude/claude_desktop_config.json`.
+- **Cursor:** `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project.
+- **Windsurf:** in the Cascade panel, open the `...` menu and choose **Open MCP config file** to edit `mcp_config.json`.
+- **Cline:** click the MCP Servers icon in the Cline panel, open **Configure**, then **Configure MCP Servers**. The Cline CLI can add it in one line: `cline mcp add bitwig --yes -- node /path/to/bitwig-control-deck/src/index.mjs`.
 
 ## MCP tool reference
 
@@ -238,7 +298,7 @@ Then delete the install folder, remove the wrapper app from `/Applications` if y
 ## FAQ
 
 **Does it work with Claude Code / Codex / Cursor / my local LLM?**
-Yes — any MCP client. The Connect page has per-client snippets. For local LLMs, the harness (LM Studio, mcphost, etc.) speaks MCP; any local model with solid tool-calling can drive Bitwig fully offline.
+Yes. It works with Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, and GitHub Copilot in VS Code. It works with any MCP-compatible agent that can run a local server. See [Setup snippets](#setup-snippets), or the Connect page for snippets with your real install path. For local LLMs, the harness (LM Studio, mcphost, etc.) speaks MCP; any local model with solid tool-calling can drive Bitwig fully offline.
 
 **Can claude.ai or ChatGPT control it from the cloud via a connector?**
 Not out of the box, deliberately: connectors expect a public HTTPS endpoint, and Control Deck is loopback-only. It can be bridged with a stdio→HTTP gateway plus a tunnel, but that makes your DAW internet-reachable and the bridge secret does not protect the HTTP side — you'd need real endpoint auth, an always-awake Mac, and tolerance for cloud round-trip latency. If you need other-device access, a private overlay network (e.g. plain Tailscale) is the sane middle ground. Local agents over stdio are the supported path.
