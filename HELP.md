@@ -78,7 +78,7 @@ Setup installs the controller script into Bitwig's default controller-script fol
 2. Click **+ Add Controller**.
 3. Choose vendor **Control Deck**, then **Control Deck Bridge**, and click **Add**.
 4. If the "Control Deck Bridge In/Out" MIDI ports exist, assign them. If they don't, leave the ports unassigned — the bridge communicates over local UDP; the MIDI identity exists only for auto-detection and is not used for control data.
-5. The entry's power button should be on. You'll see the **"Control Deck Bridge online"** popup, and the script console (the `>` icon on the controller entry) logs `Control Deck Bridge 1.0.0 listening on UDP 50701`.
+5. The entry's power button should be on. You'll see the **"Control Deck Bridge online"** popup, and the script console (the `>` icon on the controller entry) logs `Control Deck Bridge <version> listening on UDP 50701`.
 
 **Verifying and reloading.** The dashboard's Deck page flips to "Bitwig is linked." the moment the bridge is up — that's the quickest end-to-end check. After re-running setup (which re-stamps the secret into the controller script), make Bitwig reload it: restart Bitwig, or toggle the controller's power button off and on in Settings → Controllers.
 

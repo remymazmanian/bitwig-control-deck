@@ -4,12 +4,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-28
+
+Fixes security advisories in the dashboard and MCP server dependencies, lists the agents Control Deck works with in the docs and on the Connect page, and clears the dashboard lint errors.
+
 ### Security
 
 - Updated Next.js to 16.4.1, which fixes GHSA-2464-fhr4-w9xw, GHSA-673q-mjm6-r5xr and GHSA-p3m5-59mp-jv5r (CVE-2026-94482) in the dashboard.
 - Updated the MCP server's dependencies body-parser (2.4.0), fast-uri (3.1.9), ip-address (10.7.5) and qs (6.17.1), which fixes GHSA-27r3-jxmh-p828, GHSA-w74x-v6f9-j3xg, GHSA-xhq7-xmqj-769h, GHSA-wjr9-j795-jxcr, GHSA-333x-w4r6-6crp, GHSA-rxp7-6hxx-x8q5 and GHSA-6pq8-jhm2-2vcw.
 - Updated zod to 4.6.7 in the MCP server, which fixes GHSA-mrhx-c7xc-m3w5. Tool inputs validate the same way as before.
 - Updated zod to 4.6.7 in the dashboard's lint tooling, which fixes GHSA-mrhx-c7xc-m3w5 there too.
+
+### Changed
+
+- README and HELP list the agents Control Deck works with: Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, and GitHub Copilot in VS Code, plus any MCP-compatible agent that can run a local server, with setup snippets for each.
+- The dashboard's Connect page lists the same agents, with a snippet for each that uses your real install path.
+- Docs and the setup script use SI wording.
 
 ### Fixed
 
@@ -113,7 +123,8 @@ First release of Bitwig Control Deck, a local MCP bridge that lets an AI agent c
 - Local dashboard at `http://127.0.0.1:50703` showing bridge health, the current session, loaded devices and a searchable inventory of installed VST3, VST2, Audio Unit and CLAP plug-ins. Its Connect page has copy-paste setup guides for Claude Code, Codex, Cursor, VS Code, Gemini CLI, local LLM setups and other MCP clients.
 - Local operation: the status service and dashboard listen on this Mac only, and every request to the Bitwig bridge must carry a secret generated for your install.
 
-[Unreleased]: https://github.com/remymazmanian/bitwig-control-deck/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/remymazmanian/bitwig-control-deck/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/remymazmanian/bitwig-control-deck/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.2.0
 [1.1.0]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.1.0
 [1.0.2]: https://github.com/remymazmanian/bitwig-control-deck/releases/tag/v1.0.2
