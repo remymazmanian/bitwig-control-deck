@@ -102,7 +102,7 @@ Order never matters — every piece waits gracefully for the others.
 
 ## Connecting AI agents
 
-The **Connect page** (`http://127.0.0.1:50703/connect`) is the canonical guide, with exact snippets for Claude Code, Claude Desktop, Codex, Cursor, VS Code, Windsurf, Gemini CLI, Grok CLI, local LLM harnesses (LM Studio, Ollama via mcphost), and any other MCP client. The universal facts:
+The **Connect page** (`http://127.0.0.1:50703/connect`) is the canonical guide, with exact snippets for Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, GitHub Copilot in VS Code, local LLM harnesses (LM Studio, Ollama via mcphost), and any other MCP client. The universal facts:
 
 - **Command:** `node <install-path>/src/index.mjs`
 - **Transport:** stdio — no URL, no port, no network setup

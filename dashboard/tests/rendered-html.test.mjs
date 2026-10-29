@@ -63,8 +63,14 @@ test("server-renders the connect page", async () => {
   assert.match(html, /Claude Code/);
   assert.match(html, /Claude Desktop/);
   assert.match(html, /Codex/);
-  assert.match(html, /Gemini CLI/);
+  assert.match(html, /Cursor/);
+  assert.match(html, /OpenAI Codex/);
   assert.match(html, /Grok CLI/);
+  assert.match(html, /Windsurf/);
+  assert.match(html, /Cline/);
+  assert.match(html, /GitHub Copilot in VS Code/);
+  assert.match(html, /grok mcp add bitwig/);
+  assert.doesNotMatch(html, /Gemini|\.vscode\/mcp\.json|\.grok\/settings\.json/);
   assert.match(html, /Local LLMs/i);
   assert.match(html, /Remote connectors/i);
   assert.match(html, /mcpServers/);

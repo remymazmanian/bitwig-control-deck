@@ -91,7 +91,7 @@ In Bitwig, open **Settings → Controllers** and confirm “Control Deck Bridge�
 
 ### Connecting other agents
 
-The dashboard's **Connect** page ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste setup guides — rendered with your machine's real install path — for Claude Code, Claude Desktop, Codex, Cursor, VS Code, Windsurf, Gemini CLI, Grok CLI, fully local LLM harnesses (LM Studio, Ollama via mcphost), and any other MCP client, plus an honest discussion of what it would take (and cost, security-wise) to expose the bridge to remote connectors like claude.ai. The short version: any agent that can launch a stdio MCP server can drive Bitwig; remote cloud connectors are deliberately out of scope.
+The dashboard's **Connect** page ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste setup guides — rendered with your machine's real install path — for Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, GitHub Copilot in VS Code, fully local LLM harnesses (LM Studio, Ollama via mcphost), and any other MCP client, plus an honest discussion of what it would take (and cost, security-wise) to expose the bridge to remote connectors like claude.ai. The short version: any agent that can launch a stdio MCP server can drive Bitwig; remote cloud connectors are deliberately out of scope.
 
 ## Control Deck dashboard
 
