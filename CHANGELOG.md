@@ -4,6 +4,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- Updated Next.js to 16.4.1, which fixes GHSA-2464-fhr4-w9xw, GHSA-673q-mjm6-r5xr and GHSA-p3m5-59mp-jv5r (CVE-2026-94482) in the dashboard.
+
 ## [1.2.0] - 2026-10-28
 
 Makes the bridge safer and more exact: it ignores requests with the wrong auth token, track and device tools check Bitwig's lists before reporting success, launcher tools reach every scene, and your selection and transport settings come back after a tool runs. Tested live in Bitwig Studio 6.1.3.
