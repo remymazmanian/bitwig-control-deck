@@ -65,6 +65,9 @@ var saveToLibraryAction;
 var jumpToBeginningAction;
 var trackMeterLatest = [];
 var trackMeterMaximum = [];
+// Name of the track each maximum was measured on. Maxima are stored by bank
+// position, so a track that moves to another position must not inherit them.
+var trackMeterOwner = [];
 var requestQueue = [];
 var requestBusy = false;
 var currentRequest = null;
@@ -296,12 +299,13 @@ function readTrackMeters(resetAfterRead) {
    for (var i = 0; i < total; i++) {
       var track = trackBank.getItemAt(i);
       if (!track.exists().get()) continue;
+      var maximum = meterMaximumFor(i, track.name().get());
       meters.push({
          index: i,
          name: track.name().get(),
          latest: Number(trackMeterLatest[i] || 0),
-         maximum: Number(trackMeterMaximum[i] || 0),
-         maximumNormalized: Number(trackMeterMaximum[i] || 0) / 127
+         maximum: maximum,
+         maximumNormalized: maximum / 127
       });
       if (resetAfterRead) trackMeterMaximum[i] = Number(trackMeterLatest[i] || 0);
    }
@@ -337,6 +341,7 @@ function selectTrack(request, params, callback) {
    var track = requireTrack(params);
    var index = Number(params.trackIndex);
    var expectedName = track.name().get();
+   rememberSelection(request);
    track.selectInMixer();
    later(140, function() {
       try {
@@ -351,6 +356,56 @@ function selectTrack(request, params, callback) {
          finish(request, false, { message: String(error.message || error) });
       }
    });
+}
+
+// Tools that work through Bitwig's cursor move the track (and device) selection.
+// The first time a request does that, note what was selected, and put it back
+// when the request ends, whether it succeeded or failed.
+function rememberSelection(request) {
+   if (request.selectionRemembered) return;
+   request.selectionRemembered = true;
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   var saved = null;
+   for (var i = 0; i < count; i++) {
+      if (trackIsCursor[i].get()) {
+         saved = { trackIndex: i, trackName: trackBank.getItemAt(i).name().get(), deviceName: null, devicePosition: -1 };
+         break;
+      }
+   }
+   // Master, effect tracks and tracks past the first 128 can't be selected again
+   // from the main track list, so their selection is left where the tool put it.
+   if (!saved) return;
+   if (cursorDevice.exists().get() && !cursorDevice.isNested().get()) {
+      saved.deviceName = cursorDevice.name().get();
+      saved.devicePosition = cursorDevice.position().get();
+   }
+   var previousCleanup = request.cleanup;
+   request.cleanup = function() {
+      if (previousCleanup) previousCleanup();
+      restoreSelection(saved);
+   };
+}
+
+function restoreSelection(saved) {
+   var track = trackBank.getItemAt(saved.trackIndex);
+   // The track moved or was deleted by the tool: there is nothing safe to go back to.
+   if (!track.exists().get() || track.name().get() !== saved.trackName) return;
+   if (!trackIsCursor[saved.trackIndex].get()) {
+      track.selectInMixer();
+      return;
+   }
+   // Same track: put the device selection back, following the device by name
+   // when the tool inserted or removed devices in front of it.
+   if (saved.deviceName === null) return;
+   if (cursorDevice.exists().get() && cursorDevice.name().get() === saved.deviceName &&
+      cursorDevice.position().get() === saved.devicePosition) return;
+   var count = Math.min(deviceBank.itemCount().get(), MAX_DEVICES);
+   var best = -1;
+   for (var d = 0; d < count; d++) {
+      if (deviceBank.getItemAt(d).name().get() !== saved.deviceName) continue;
+      if (best < 0 || Math.abs(d - saved.devicePosition) < Math.abs(best - saved.devicePosition)) best = d;
+   }
+   if (best >= 0) cursorDevice.selectDevice(deviceBank.getItemAt(best));
 }
 
 function deviceSnapshot(device, index) {
@@ -1082,27 +1137,56 @@ function handleNestDevice(request) {
    });
 }
 
+// Bitwig's API can open the Save to Library dialog but can't see it or type
+// into it. Enter goes to whatever has keyboard focus, so it is only pressed
+// when the caller asks for it (confirm: true) and the same device is still
+// selected on the same track right before the key press.
 function handleSaveDevicePreset(request) {
    var params = request.params;
+   if (!saveToLibraryAction) throw new Error("This Bitwig version has no Save to Library action, so the preset can't be saved from Control Deck.");
    selectDevice(request, params, function(device) {
       try {
          var presetName = String(params.presetName || "").trim();
+         var confirm = params.confirm === true;
+         var trackName = cursorTrack.name().get();
+         var deviceName = device.name().get();
+         var devicePosition = device.position().get();
+         var presetNameBefore = device.presetName().get();
          device.selectInEditor();
          later(180, function() {
             try {
                saveToLibraryAction.invoke();
                later(700, function() {
-                  if (params.confirm !== false) application.enter();
-                  later(450, function() {
-                     finish(request, true, {
-                        device: deviceSnapshot(device, Number(params.deviceIndex)),
-                        requestedPresetName: presetName,
-                        saveToLibraryOpened: true,
-                        confirmationSent: params.confirm !== false,
-                        nameEntryRequired: params.confirm === false && !!presetName,
-                        suggestedPresetName: presetName || null
+                  try {
+                     if (confirm) {
+                        var stillSelected = cursorTrack.name().get() === trackName &&
+                           cursorDevice.exists().get() &&
+                           cursorDevice.name().get() === deviceName &&
+                           cursorDevice.position().get() === devicePosition;
+                        if (!stillSelected) {
+                           throw new Error("The selection changed while Bitwig's Save to Library dialog was opening, so Enter was not pressed. Check Bitwig and close the dialog if it is open.");
+                        }
+                        application.enter();
+                     }
+                     later(450, function() {
+                        var presetNameAfter = device.presetName().get();
+                        finish(request, true, {
+                           device: deviceSnapshot(device, Number(params.deviceIndex)),
+                           requestedPresetName: presetName,
+                           saveToLibraryOpened: true,
+                           confirmationSent: confirm,
+                           presetNameBefore: presetNameBefore,
+                           presetNameAfter: presetNameAfter,
+                           note: confirm
+                              ? "Bitwig doesn't report whether the dialog saved. A changed presetNameAfter is a good sign; check the Library to be sure."
+                              : "The dialog is open in Bitwig. Type the name and press Save there.",
+                           nameEntryRequired: !confirm && !!presetName,
+                           suggestedPresetName: presetName || null
+                        });
                      });
-                  });
+                  } catch (error) {
+                     finish(request, false, { message: String(error.message || error) });
+                  }
                });
             } catch (error) {
                finish(request, false, { message: String(error.message || error) });
@@ -2758,8 +2842,23 @@ function observeTrackMeter(track, index) {
    track.addVuMeterObserver(128, -1, true, function(value) {
       var numeric = Number(value || 0);
       trackMeterLatest[index] = numeric;
-      if (numeric > Number(trackMeterMaximum[index] || 0)) trackMeterMaximum[index] = numeric;
+      var name = track.name().get();
+      if (trackMeterOwner[index] !== name) {
+         trackMeterOwner[index] = name;
+         trackMeterMaximum[index] = numeric;
+      } else if (numeric > Number(trackMeterMaximum[index] || 0)) trackMeterMaximum[index] = numeric;
    });
+}
+
+// The maximum only counts when it was measured on the track that sits at this
+// position now. After tracks are added, deleted or moved, it starts again from
+// the latest level.
+function meterMaximumFor(index, name) {
+   if (trackMeterOwner[index] !== name) {
+      trackMeterOwner[index] = name;
+      trackMeterMaximum[index] = Number(trackMeterLatest[index] || 0);
+   }
+   return Number(trackMeterMaximum[index] || 0);
 }
 
 function markDevice(device) {

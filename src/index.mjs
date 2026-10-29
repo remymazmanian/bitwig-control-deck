@@ -191,11 +191,11 @@ server.registerTool("bitwig_nest_device", {
 }, async args => call("nest_device", args, 15000));
 
 server.registerTool("bitwig_save_device_preset", {
-  description: "Open Bitwig’s native Save to Library flow for one verified device and optionally confirm its prefilled name without mouse automation.",
+  description: "Open Bitwig’s native Save to Library dialog for one verified device. Bitwig's API can't type the name, so the dialog stays open for you unless confirm is true, which presses Enter to accept the prefilled name.",
   inputSchema: {
     ...deviceSelector,
     presetName: z.string().min(1).max(120),
-    confirm: z.boolean().default(true)
+    confirm: z.boolean().default(false).describe("Press Enter to accept Bitwig's prefilled name. Only sent if the same device is still selected.")
   }
 }, async args => call("save_device_preset", args, 15000));
 

@@ -118,7 +118,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 - **bitwig_actions** — Search Bitwig Studio's native action registry by action id, name, or menu text.
 - **bitwig_invoke_action** — Invoke one exact Bitwig action id previously returned by `bitwig_actions`.
 - **bitwig_transport** — Read or control Bitwig transport. Tempo changes are read back before success is reported.
-- **bitwig_track_meters** — Read peak signal activity captured for every track, or reset the captured maxima before a playback test.
+- **bitwig_track_meters** — Read peak signal activity captured for every track, or reset the captured maxima before a playback test. When tracks are added, deleted or moved, a track that lands on a new position starts a fresh maximum instead of inheriting the previous track's peak.
 
 ### Tracks
 
@@ -200,6 +200,10 @@ Ports (all loopback-only): `50701/udp` bridge, `50702/tcp` status API, `50703/tc
 **Everything broke after upgrading Node.** The launch agents pin the Node binary that ran setup. Re-run setup with the new Node and they're re-pinned.
 
 **"MIDI helper skipped" during setup.** Apple's command line tools are missing. Run `xcode-select --install`, accept the popup, run setup again. Or skip it forever and add the controller in Bitwig manually — the helper is only for auto-detection.
+
+**Save to Library opened, but nothing was saved.** Bitwig's API can open the dialog but can't type into it, so `bitwig_save_device_preset` leaves the dialog open for you to name and save. With `confirm: true` it presses Enter to accept the prefilled name, and only when the same device is still selected. Compare `presetNameBefore` and `presetNameAfter` in the reply, then check the Library.
+
+**The selected track flickers while a tool runs.** Device, sample and clip tools work through Bitwig's selection, so they select their track for a moment. When the tool finishes, Control Deck selects your track again, and your device too when the tool worked on that same track. Selection is left alone when your track moved or was deleted, and when you had the master, an effect track or a track past the first 128 selected. `bitwig_create_track` still leaves the new track selected.
 
 **macOS refuses to open the installer.** Downloaded, non-notarized scripts need a one-time right-click → **Open**. Everything after that first launch is normal.
 
