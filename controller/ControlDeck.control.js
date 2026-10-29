@@ -1,13 +1,13 @@
 loadAPI(18);
 
-host.defineController("Control Deck", "Control Deck Bridge", "1.1.0", "BC47EFA3-FFD7-4155-9AE6-164DB3E58E89");
+host.defineController("Control Deck", "Control Deck Bridge", "1.2.0", "BC47EFA3-FFD7-4155-9AE6-164DB3E58E89");
 host.defineMidiPorts(1, 1);
 // Control Deck's native macOS helper publishes these private virtual endpoints. They
 // give Bitwig a device identity for auto-add; control data uses an authenticated
 // local UDP channel that never leaves this Mac.
 host.addDeviceNameBasedDiscoveryPair(["Control Deck Bridge In"], ["Control Deck Bridge Out"]);
 
-var CONTROL_DECK_VERSION = "1.1.0";
+var CONTROL_DECK_VERSION = "1.2.0";
 var CONTROL_DECK_PROTOCOL = "control-deck/1";
 var CONTROL_DECK_PORT = 50701;
 // Stamped with a per-install secret by `npm run setup`. The bridge refuses to

@@ -1,6 +1,6 @@
 {
   "name": "bitwig-control-deck",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Bitwig Control Deck: an MCP bridge for exact, read-back-verified Bitwig Studio control, with a local status dashboard",
