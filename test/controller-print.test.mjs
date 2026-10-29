@@ -13,7 +13,12 @@ function fakeTransport(context, state) {
   return {
     tempo: () => ({ value: () => ({ getRaw: () => state.tempo, setRaw: next => { state.log.push("tempo=" + next); state.tempo = next; } }) }),
     getPosition: () => value(position),
-    setPosition: beats => { state.log.push("position=" + beats); state.position = beats; },
+    setPosition: beats => {
+      state.log.push("position=" + beats);
+      // Like Bitwig, a move made right after stopping can be dropped.
+      if (state.dropMoveAfterStop && state.justStopped) { state.justStopped = false; return; }
+      state.position = beats;
+    },
     isArrangerLoopEnabled: () => flag("loop"),
     isArrangerOverdubEnabled: () => flag("arrangerOverdub"),
     isClipLauncherOverdubEnabled: () => flag("launcherOverdub"),
@@ -28,6 +33,7 @@ function fakeTransport(context, state) {
     stop: () => {
       if (playStartedAt !== null) state.position = position();
       playStartedAt = null;
+      state.justStopped = true;
       state.log.push("stop");
     }
   };
@@ -61,7 +67,7 @@ function setup(options = {}) {
   context.dispatch = loaded.originalDispatch;
   const state = {
     tempo: 120, position: 3, loop: true, arrangerOverdub: true, launcherOverdub: true, record: false,
-    refusePlay: Boolean(options.refusePlay), log: [], jumps: 0
+    refusePlay: Boolean(options.refusePlay), dropMoveAfterStop: Boolean(options.dropMoveAfterStop), log: [], jumps: 0
   };
   state.tracks = [fakeTrack("Bass", state, true), fakeTrack("Keys", state, false), fakeTrack("Vox", state, true)];
   context.transport = fakeTransport(context, state);
@@ -100,6 +106,15 @@ test("the print disarms tracks and turns off overdub while recording, then puts 
   assert.ok(before.includes("arrangerOverdub=false") && before.includes("launcherOverdub=false"));
   assert.equal(state.tracks[1].launches[0].armedTracks, 0);
   assert.equal(responses[0].payload.restoredArmedTracks, 2);
+  expectRestored(state);
+});
+
+test("the print moves the playhead back even when Bitwig drops the first move after stopping", () => {
+  const { context, responses, advance, state } = setup({ dropMoveAfterStop: true });
+  context.enqueue(5000, "1", "arrange_launcher_clips", { regions: [region(1, 0, 8)] }, 120000);
+  advance(30000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.equal(responses[0].payload.restoredPositionBeats, 3);
   expectRestored(state);
 });
 

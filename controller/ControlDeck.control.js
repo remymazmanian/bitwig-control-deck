@@ -1784,6 +1784,9 @@ function handleRecordLauncherArrangement(request) {
       for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(true);
       transport.tempo().value().setRaw(restoreTempo);
       transport.setPosition(saved.position);
+      // Bitwig drops a playhead move made while the transport is still
+      // stopping, so move it again once the stop has landed.
+      host.scheduleTask(function() { transport.setPosition(saved.position); }, 200);
    }
    request.cleanup = restoreState;
 
