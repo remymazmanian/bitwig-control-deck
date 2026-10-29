@@ -6,7 +6,9 @@ Tell an AI what to change in Bitwig Studio. Control Deck does it on your Mac, th
 
 ![Control Deck dashboard](docs/dashboard.png)
 
-Bitwig Control Deck is a local [MCP](https://modelcontextprotocol.io) bridge for Bitwig Studio. It gives any MCP client — Claude Code, Claude Desktop, Codex, or anything else that speaks MCP — exact, read-back-verified control of Bitwig tracks, devices, transport, native devices, and third-party plug-in parameters, plus a local status dashboard.
+Bitwig Control Deck is a local [MCP](https://modelcontextprotocol.io) bridge for Bitwig Studio. It gives your agent exact, read-back-verified control of Bitwig tracks, devices, transport, native devices, and third-party plug-in parameters, plus a local status dashboard.
+
+It works with Claude Desktop, Claude Code, Cursor, OpenAI Codex, Grok CLI, Windsurf, Cline, and GitHub Copilot in VS Code. It works with any MCP-compatible agent that can run a local server.
 
 Everything runs on your machine and binds only to loopback addresses. Nothing is published or exposed to the network.
 
@@ -82,6 +84,8 @@ Then add the MCP server to your client. For example, for Claude Code:
 ```sh
 claude mcp add bitwig -- node /path/to/bitwig-control-deck/src/index.mjs
 ```
+
+Setup snippets for the other agents are in [HELP.md](HELP.md#setup-snippets).
 
 In Bitwig, open **Settings → Controllers** and confirm “Control Deck Bridge” is active.
 
