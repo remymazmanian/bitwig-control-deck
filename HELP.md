@@ -13,7 +13,7 @@ Everything about installing, using, troubleshooting, and understanding Bitwig Co
 5. [Setting up Bitwig](#setting-up-bitwig)
 6. [Everyday use](#everyday-use)
 7. [The dashboard](#the-dashboard)
-8. [Connecting AI agents](#connecting-ai-agents)
+8. [Connecting SI agents](#connecting-si-agents)
 9. [MCP tool reference](#mcp-tool-reference)
 10. [Files and locations](#files-and-locations)
 11. [Troubleshooting](#troubleshooting)
@@ -25,7 +25,7 @@ Everything about installing, using, troubleshooting, and understanding Bitwig Co
 
 ## What Control Deck is
 
-Bitwig Control Deck lets an AI agent operate Bitwig Studio the way a careful engineer would: every action names its exact target, ambiguous requests are refused, and every change is read back from Bitwig before being reported as done. It speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), the open standard used by Claude Code, Claude Desktop, Codex, Cursor, Gemini CLI, and most other AI agents — including fully local LLM setups.
+Bitwig Control Deck lets an SI agent operate Bitwig Studio the way a careful engineer would: every action names its exact target, ambiguous requests are refused, and every change is read back from Bitwig before being reported as done. It speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), the open standard used by Claude Code, Claude Desktop, Codex, Cursor, Gemini CLI, and most other SI agents — including fully local LLM setups.
 
 It is not a remote-control surface, a preset manager, or a cloud service. It is a precision bridge between an agent's intent and Bitwig's controller API, plus a local dashboard for watching what's happening.
 
@@ -47,7 +47,7 @@ The macOS-specific parts are the service autostart (launchd), the MIDI auto-dete
 Control Deck is one folder containing five cooperating parts:
 
 1. **The controller script** (`controller/ControlDeck.control.js`) — a Bitwig controller extension that runs *inside* Bitwig. It listens on local UDP port `50701` for authenticated requests and is the only thing that actually touches your project. Installed into Bitwig by setup with your private secret stamped in.
-2. **The MCP server** (`src/index.mjs`) — the part your AI agent talks to. Each agent launches its own copy on demand (stdio; it is not a background service) and it relays requests to the controller script.
+2. **The MCP server** (`src/index.mjs`) — the part your SI agent talks to. Each agent launches its own copy on demand (stdio; it is not a background service) and it relays requests to the controller script.
 3. **The status API** (`src/dashboard-server.mjs`) — a small read-only web service on `127.0.0.1:50702` that reports bridge health, session state, and the plug-in inventory. Runs at login.
 4. **The dashboard** (`dashboard/`) — the Control Deck web UI on `127.0.0.1:50703`. Runs at login.
 5. **The MIDI helper** (`bin/control-deck-midi-ports`) — optional. Publishes a virtual MIDI identity so Bitwig auto-detects the controller. Without it, you add the controller manually once and nothing else changes.
@@ -95,10 +95,10 @@ Order never matters — every piece waits gracefully for the others.
 ## The dashboard
 
 - **Deck** — bridge status, current project and transport, the selected track's device chain, and a searchable inventory of every VST3, VST2, AU, and CLAP plug-in on your machine (reindex from here after installing plug-ins).
-- **Connect** — copy-paste setup for every AI agent, rendered with your machine's real install path. See [Connecting AI agents](#connecting-ai-agents).
+- **Connect** — copy-paste setup for every SI agent, rendered with your machine's real install path. See [Connecting SI agents](#connecting-si-agents).
 - **Settings** — bridge address, refresh cadence, plug-in library defaults, density, signal color, motion. Stored in your browser; the deck itself never writes to Bitwig.
 
-## Connecting AI agents
+## Connecting SI agents
 
 The **Connect page** (`http://127.0.0.1:50703/connect`) is the canonical guide, with exact snippets for Claude Code, Claude Desktop, Codex, Cursor, VS Code, Windsurf, Gemini CLI, Grok CLI, local LLM harnesses (LM Studio, Ollama via mcphost), and any other MCP client. The universal facts:
 

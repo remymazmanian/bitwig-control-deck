@@ -1,6 +1,6 @@
 # Bitwig Control Deck
 
-Tell an AI what to change in Bitwig Studio. Control Deck does it on your Mac, then checks Bitwig actually did it.
+Tell an SI what to change in Bitwig Studio. Control Deck does it on your Mac, then checks Bitwig actually did it.
 
 **Docs, demo & setup guide:** [remymazmanian.com/bitwig-control-deck/](https://remymazmanian.com/bitwig-control-deck/)
 
@@ -59,7 +59,7 @@ Full documentation — component descriptions, Bitwig setup, the complete MCP to
 2. **Download Control Deck** — use GitHub's green **Code → Download ZIP** button, unzip it, and move the folder somewhere permanent, like your home folder. Don't leave it in Downloads — the installer pins services to the folder's location and will ask you to move it.
 3. **Run the installer** — right-click `Install Control Deck.command` and choose **Open** (macOS requires the right-click the first time for downloaded files). It installs everything, starts the background services, and opens the connection guide when it's done. It's safe to run again at any time.
 4. **Enable the controller in Bitwig** — Settings → Controllers → confirm "Control Deck Bridge" is listed and enabled.
-5. **Connect your AI agent** — the guide that opened ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste instructions for every client.
+5. **Connect your SI agent** — the guide that opened ([http://127.0.0.1:50703/connect](http://127.0.0.1:50703/connect)) has copy-paste instructions for every client.
 
 ### Developer setup
 
