@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 
 - `bitwig_cue_markers` upsert moved the playhead to a spot past the last marker for every new marker and then jumped back, which was audible during playback. New markers are now added at the current playhead and moved into place, so the playhead stays where it is. The only exception is a stopped transport with a marker already under the playhead: the bridge then moves the playhead aside for the add and puts it back before replying.
+- Launcher tools are no longer limited to the first eight scenes. `bitwig_create_note_clip`, `bitwig_clip_notes` and `bitwig_launch_scene` accept slots up to 1023 and scroll Bitwig's scene window to reach them, and `bitwig_clips` lists clips in every scene.
+- `bitwig_create_note_clip` can add a clip one slot past the last scene; Bitwig creates the scene for it.
+- `bitwig_arrange_launcher_clips` disarms armed tracks and turns off Arranger and Launcher overdub while it records, so live input and overdub no longer land in the print. Both are put back afterwards.
+- `bitwig_arrange_launcher_clips` starts recording at the earliest requested region instead of beat 0, and refuses a print longer than 1024 beats, which could not finish inside its time limit.
+- `bitwig_arrange_launcher_clips` stops with an error as soon as the transport stops mid-print, instead of waiting out its 115-second limit.
+- When `bitwig_arrange_launcher_clips` fails or times out, Bitwig gets back its tempo, loop, overdub, track arms and playhead position, and the tracks return to the Arranger. This now happens as soon as the request ends, without waiting for the recording loop to notice.
+
+### Removed
+
+- Unused copy-and-paste arrangement code in the controller script, and the Bitwig actions only it used.
+- A reply too large for one message could silently never arrive, and the client only saw a timeout. The bridge now checks every reply against a 60,000-byte limit (the same limit the client uses for requests) and sends a clear error instead. If Bitwig cannot send a reply at all, the bridge logs it as an error and tries to tell the client with a short error reply.
+- After a request timed out or failed, its remaining delayed steps kept running. They could keep changing Bitwig, and an error in one of them could fail the next, unrelated request. Those steps are now dropped once their request has been answered.
 
 ## [1.1.0] - 2026-10-28
 
