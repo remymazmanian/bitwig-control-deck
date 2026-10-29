@@ -251,6 +251,6 @@ heading("Setup complete. Two steps left:");
 console.log(`
   1. Open Bitwig → Settings → Controllers and confirm “Control Deck Bridge”
      is listed and enabled (add it manually if it was not auto-detected).
-  2. Connect your AI agent: open http://127.0.0.1:50703/connect for
+  2. Connect your SI agent: open http://127.0.0.1:50703/connect for
      copy-paste instructions for Claude Code, Codex, and every other client.
 `);
