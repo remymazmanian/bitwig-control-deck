@@ -130,7 +130,7 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 
 ### Clips & arrangement
 
-- **bitwig_clips** — List populated launcher clips for one exact track.
+- **bitwig_clips** — List populated launcher clips in every scene for one exact track, with the project's scene count. Clip and scene tools take slot and scene numbers from 0 to 1023, and creating a clip one slot past the last scene adds a new scene for it.
 - **bitwig_clip_notes** — Read every note in one launcher clip (beat, pitch, velocity, duration, channel, muted). Notes are read from Bitwig's step grid, so a note that starts between steps comes back at the step it starts in; the reply says `quantized: true`.
 - **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content. Every note is then read back from the clip; a missing, changed, muted, or extra note fails the call and names the first five differences.
 - **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions. Recording starts at the earliest region and runs at 666 BPM, and one print covers at most 1024 beats. While it records, armed tracks are disarmed and Arranger and Launcher overdub are off, so nothing else gets recorded. Afterwards, and also when the print fails or times out, Bitwig gets back its tempo, loop, overdub, track arms and playhead position.

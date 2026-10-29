@@ -241,6 +241,7 @@ function withClip(options = {}) {
   const slot = fakeSlot(options.slot);
   const track = { clipLauncherSlotBank: () => ({ getItemAt: () => slot }) };
   context.launcherClip = clip;
+  context.sceneBank = { itemCount: () => ({ get: () => 8 }), scrollPosition: () => ({ get: () => 0, set() {} }) };
   context.selectTrack = (request, params, callback) => {
     try { callback(track); } catch (error) { context.finish(request, false, { message: String(error.message || error) }); }
   };

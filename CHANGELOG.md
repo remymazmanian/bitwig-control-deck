@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Launcher tools are no longer limited to the first eight scenes. `bitwig_create_note_clip`, `bitwig_clip_notes` and `bitwig_launch_scene` accept slots up to 1023 and scroll Bitwig's scene window to reach them, and `bitwig_clips` lists clips in every scene.
+- `bitwig_create_note_clip` can add a clip one slot past the last scene; Bitwig creates the scene for it.
 - `bitwig_arrange_launcher_clips` disarms armed tracks and turns off Arranger and Launcher overdub while it records, so live input and overdub no longer land in the print. Both are put back afterwards.
 - `bitwig_arrange_launcher_clips` starts recording at the earliest requested region instead of beat 0, and refuses a print longer than 1024 beats, which could not finish inside its time limit.
 - `bitwig_arrange_launcher_clips` stops with an error as soon as the transport stops mid-print, instead of waiting out its 115-second limit.

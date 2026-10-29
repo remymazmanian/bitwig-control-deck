@@ -16,6 +16,9 @@ var CONTROL_DECK_TOKEN = "__CONTROL_DECK_TOKEN__";
 var MAX_TRACKS = 128;
 var MAX_DEVICES = 64;
 var MAX_SCENES = 8;
+// Highest launcher slot or scene the tools accept. Bitwig shows MAX_SCENES of
+// them at a time, and withSceneSlot scrolls that window to reach the rest.
+var MAX_SCENE_SLOTS = 1024;
 var MAX_CUE_MARKERS = 256;
 // Longest stretch one launcher print records: about 92 seconds at 666 BPM,
 // inside the print's 115-second limit.
@@ -1547,14 +1550,58 @@ function compareWrittenNotes(validated, stepSize, actual) {
    return { expectedCount: expected.length, problems: problems };
 }
 
+// Bitwig shows MAX_SCENES launcher slots at a time. This scrolls that window
+// until slotIndex is in view and calls callback(item, localIndex), where item
+// is the track's slot, or the scene when track is null. The window goes back to
+// the first scenes when the request ends.
+function withSceneSlot(request, track, slotIndex, callback) {
+   var sceneCount = sceneBank.itemCount().get();
+   if (slotIndex >= sceneCount) {
+      throw new Error("Slot " + slotIndex + " does not exist. The project has " + sceneCount + " scenes, so slots run from 0 to " + (sceneCount - 1) + ".");
+   }
+   // Run after any cleanup the request already has, such as putting the
+   // selection back, and only add it once per request.
+   if (!request.sceneWindowCleanup) {
+      request.sceneWindowCleanup = true;
+      var previousCleanup = request.cleanup;
+      request.cleanup = function() {
+         resetSceneWindow();
+         if (previousCleanup) previousCleanup();
+      };
+   }
+   var target = Math.floor(slotIndex / MAX_SCENES) * MAX_SCENES;
+   var attempts = 0;
+   function showSlot() {
+      var position = sceneBank.scrollPosition().get();
+      if (slotIndex >= position && slotIndex < position + MAX_SCENES) {
+         var localIndex = slotIndex - position;
+         callback(track ? track.clipLauncherSlotBank().getItemAt(localIndex) : sceneBank.getItemAt(localIndex), localIndex);
+         return;
+      }
+      if (attempts++ >= 20) throw new Error("Bitwig did not scroll its scene window to slot " + slotIndex + ".");
+      sceneBank.scrollPosition().set(target);
+      later(50, showSlot);
+   }
+   showSlot();
+}
+
+function resetSceneWindow() {
+   if (sceneBank.scrollPosition().get() !== 0) sceneBank.scrollPosition().set(0);
+}
+
+function requireSlotIndex(value, label) {
+   var slotIndex = Number(value);
+   if (!(slotIndex >= 0 && slotIndex < MAX_SCENE_SLOTS) || Math.floor(slotIndex) !== slotIndex) {
+      throw new Error(label + " slot must be a whole number from 0 to " + (MAX_SCENE_SLOTS - 1) + ".");
+   }
+   return slotIndex;
+}
+
 function handleCreateNoteClip(request) {
    var params = request.params;
-   var slotIndex = Number(params.slotIndex);
+   var slotIndex = requireSlotIndex(params.slotIndex, "Clip");
    var lengthBeats = Number(params.lengthBeats);
    var stepSize = Number(params.stepSize || 0.25);
-   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-      throw new Error("Clip slot must be between 0 and " + (MAX_SCENES - 1) + ".");
-   }
    if (!(lengthBeats >= 1 && lengthBeats <= 512) || Math.floor(lengthBeats) !== lengthBeats) {
       throw new Error("Clip length must be a whole number from 1 to 512 beats.");
    }
@@ -1562,131 +1609,165 @@ function handleCreateNoteClip(request) {
    var validated = validateClipNotes(params.notes || [], stepSize, lengthBeats);
 
    selectTrack(request, params, function(track) {
-      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
-      later(100, function() {
-         try {
-            if (slot.hasContent().get() && !params.replace) {
-               throw new Error("Clip slot " + slotIndex + " already has content. Pass replace=true to replace it.");
-            }
+      var sceneCount = sceneBank.itemCount().get();
+      if (slotIndex > sceneCount) {
+         throw new Error("Slot " + slotIndex + " is past the end of the launcher. The project has " + sceneCount +
+            " scenes, so a new clip can go in slot " + sceneCount + " at most.");
+      }
+      if (slotIndex === sceneCount) {
+         createInNewScene(request, track, slotIndex, lengthBeats, function() {
+            withSceneSlot(request, track, slotIndex, function(slot) {
+               fillNewClip(request, params, slot, slotIndex, lengthBeats, stepSize, validated);
+            });
+         });
+         return;
+      }
+      withSceneSlot(request, track, slotIndex, function(slot) {
+         later(100, function() {
+            try {
+               if (slot.hasContent().get() && !params.replace) {
+                  throw new Error("Clip slot " + slotIndex + " already has content. Pass replace=true to replace it.");
+               }
 
-            function createClip() {
-               slot.createEmptyClip(lengthBeats);
-               later(180, function() {
-                  try {
-                     slot.select();
-                     later(180, function() {
-                        try {
-                           if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the new launcher clip.");
-                           launcherClip.setStepSize(stepSize);
-                           launcherClip.scrollToKey(0);
-                           launcherClip.scrollToStep(0);
-                           launcherClip.setName(String(params.clipName));
-                           launcherClip.getLoopStart().set(0);
-                           launcherClip.getLoopLength().set(lengthBeats);
-                           launcherClip.getPlayStart().set(0);
-                           launcherClip.getPlayStop().set(lengthBeats);
-                           launcherClip.isLoopEnabled().set(true);
-                           writeClipPages(launcherClip, validated, 0, function(error) {
-                              if (error) {
-                                 finish(request, false, { message: String(error.message || error) });
-                                 return;
-                              }
-                              later(280, function() {
-                                 try {
-                                    var snapshot = clipSnapshot(slot, slotIndex);
-                                    if (!snapshot.hasContent) throw new Error("Bitwig did not confirm clip content.");
-                                    readLauncherNotes(lengthBeats, stepSize, function(readError, actual) {
-                                       if (readError) {
-                                          finish(request, false, { message: "Could not read the clip back after writing: " + String(readError.message || readError) });
-                                          return;
-                                       }
-                                       var check = compareWrittenNotes(validated, stepSize, actual);
-                                       if (check.problems.length) {
-                                          var shown = check.problems.slice(0, 5).join("; ");
-                                          var more = check.problems.length > 5 ? "; and " + (check.problems.length - 5) + " more" : "";
-                                          finish(request, false, {
-                                             message: "Note verification failed: clip slot " + slotIndex + " does not match the " + check.expectedCount + " requested notes after writing. " + shown + more + "."
-                                          });
-                                          return;
-                                       }
-                                       finish(request, true, {
-                                          track: { index: params.trackIndex, name: params.trackName },
-                                          clip: clipSnapshot(slot, slotIndex),
-                                          lengthBeats: launcherClip.getLoopLength().get(),
-                                          stepSize: stepSize,
-                                          notesWritten: validated.noteCount,
-                                          notesVerified: actual.length
-                                       });
-                                    });
-                                 } catch (verificationError) {
-                                    finish(request, false, { message: String(verificationError.message || verificationError) });
-                                 }
-                              });
-                           });
-                        } catch (error) {
-                           finish(request, false, { message: String(error.message || error) });
-                        }
-                     });
-                  } catch (error) {
-                     finish(request, false, { message: String(error.message || error) });
-                  }
-               });
-            }
+               function createClip() {
+                  slot.createEmptyClip(lengthBeats);
+                  fillNewClip(request, params, slot, slotIndex, lengthBeats, stepSize, validated);
+               }
 
-            if (slot.hasContent().get()) {
-               slot.deleteObject();
-               later(180, createClip);
-            } else createClip();
-         } catch (error) {
-            finish(request, false, { message: String(error.message || error) });
-         }
+               if (slot.hasContent().get()) {
+                  slot.deleteObject();
+                  later(180, createClip);
+               } else createClip();
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
       });
+   });
+}
+
+// Bitwig creates the clip and a new scene for it when slotIndex is one past
+// the last scene, then reports the extra scene.
+function createInNewScene(request, track, slotIndex, lengthBeats, callback) {
+   track.createNewLauncherClip(slotIndex, lengthBeats);
+   var attempts = 0;
+   function waitForScene() {
+      if (sceneBank.itemCount().get() > slotIndex) {
+         callback();
+         return;
+      }
+      if (attempts++ >= 20) throw new Error("Bitwig did not add a scene for the new clip in slot " + slotIndex + ".");
+      later(50, waitForScene);
+   }
+   later(50, waitForScene);
+}
+
+// Selects a freshly created clip, writes its settings and notes, and reads
+// every note back.
+function fillNewClip(request, params, slot, slotIndex, lengthBeats, stepSize, validated) {
+   later(180, function() {
+      try {
+         slot.select();
+         later(180, function() {
+            try {
+               if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the new launcher clip.");
+               launcherClip.setStepSize(stepSize);
+               launcherClip.scrollToKey(0);
+               launcherClip.scrollToStep(0);
+               launcherClip.setName(String(params.clipName));
+               launcherClip.getLoopStart().set(0);
+               launcherClip.getLoopLength().set(lengthBeats);
+               launcherClip.getPlayStart().set(0);
+               launcherClip.getPlayStop().set(lengthBeats);
+               launcherClip.isLoopEnabled().set(true);
+               writeClipPages(launcherClip, validated, 0, function(error) {
+                  if (error) {
+                     finish(request, false, { message: String(error.message || error) });
+                     return;
+                  }
+                  later(280, function() {
+                     try {
+                        var snapshot = clipSnapshot(slot, slotIndex);
+                        if (!snapshot.hasContent) throw new Error("Bitwig did not confirm clip content.");
+                        readLauncherNotes(lengthBeats, stepSize, function(readError, actual) {
+                           if (readError) {
+                              finish(request, false, { message: "Could not read the clip back after writing: " + String(readError.message || readError) });
+                              return;
+                           }
+                           var check = compareWrittenNotes(validated, stepSize, actual);
+                           if (check.problems.length) {
+                              var shown = check.problems.slice(0, 5).join("; ");
+                              var more = check.problems.length > 5 ? "; and " + (check.problems.length - 5) + " more" : "";
+                              finish(request, false, {
+                                 message: "Note verification failed: clip slot " + slotIndex + " does not match the " + check.expectedCount + " requested notes after writing. " + shown + more + "."
+                              });
+                              return;
+                           }
+                           finish(request, true, {
+                              track: { index: params.trackIndex, name: params.trackName },
+                              clip: clipSnapshot(slot, slotIndex),
+                              lengthBeats: launcherClip.getLoopLength().get(),
+                              stepSize: stepSize,
+                              notesWritten: validated.noteCount,
+                              notesVerified: actual.length
+                           });
+                        });
+                     } catch (verificationError) {
+                        finish(request, false, { message: String(verificationError.message || verificationError) });
+                     }
+                  });
+               });
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
+      } catch (error) {
+         finish(request, false, { message: String(error.message || error) });
+      }
    });
 }
 
 function handleClipNotes(request) {
    var params = request.params;
-   var slotIndex = Number(params.slotIndex);
+   var slotIndex = requireSlotIndex(params.slotIndex, "Clip");
    var stepSize = Number(params.stepSize || 0.25);
-   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-      throw new Error("Clip slot must be between 0 and " + (MAX_SCENES - 1) + ".");
-   }
    if (!(stepSize >= 0.03125 && stepSize <= 4)) throw new Error("Clip step size must be between 1/128 and 4 beats.");
 
    selectTrack(request, params, function(track) {
-      var slot = track.clipLauncherSlotBank().getItemAt(slotIndex);
-      if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip.");
-      slot.select();
-      slot.showInEditor();
-      later(240, function() {
-         try {
-            if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
-            var loopStart = launcherClip.getLoopStart().get();
-            var loopLength = launcherClip.getLoopLength().get();
-            var lengthBeats = loopStart + loopLength;
-            if (!(lengthBeats > 0 && lengthBeats <= 512)) {
-               throw new Error("Clips must end within 512 beats to be read; this one ends at beat " + lengthBeats + ".");
-            }
-            readLauncherNotes(lengthBeats, stepSize, function(error, notes) {
-               if (error) {
-                  finish(request, false, { message: String(error.message || error) });
-                  return;
+      withSceneSlot(request, track, slotIndex, function(slot) {
+         if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip.");
+         slot.select();
+         slot.showInEditor();
+         later(240, function() {
+            try {
+               if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
+               var loopStart = launcherClip.getLoopStart().get();
+               var loopLength = launcherClip.getLoopLength().get();
+               var lengthBeats = loopStart + loopLength;
+               if (!(lengthBeats > 0 && lengthBeats <= 512)) {
+                  throw new Error("Clips must end within 512 beats to be read; this one ends at beat " + lengthBeats + ".");
                }
-               finish(request, true, {
-                  track: { index: params.trackIndex, name: params.trackName },
-                  clip: clipSnapshot(slot, slotIndex),
-                  lengthBeats: lengthBeats,
-                  loopStartBeats: loopStart,
-                  loopLengthBeats: loopLength,
-                  stepSize: stepSize,
-                  quantized: true,
-                  noteCount: notes.length,
-                  notes: notes
+               readLauncherNotes(lengthBeats, stepSize, function(error, notes) {
+                  if (error) {
+                     finish(request, false, { message: String(error.message || error) });
+                     return;
+                  }
+                  finish(request, true, {
+                     track: { index: params.trackIndex, name: params.trackName },
+                     clip: clipSnapshot(slot, slotIndex),
+                     lengthBeats: lengthBeats,
+                     loopStartBeats: loopStart,
+                     loopLengthBeats: loopLength,
+                     stepSize: stepSize,
+                     quantized: true,
+                     noteCount: notes.length,
+                     notes: notes
+                  });
                });
-            });
-         } catch (error) {
-            finish(request, false, { message: String(error.message || error) });
-         }
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
       });
    });
 }
@@ -1695,6 +1776,11 @@ function handleRecordLauncherArrangement(request) {
    var specifications = request.params.regions || [];
    if (!specifications.length) throw new Error("At least one arrangement region is required.");
    if (specifications.length > 64) throw new Error("A maximum of 64 arrangement regions can be recorded at once.");
+   // The print reads slots 0-7 through the first scene window.
+   if (sceneBank.scrollPosition().get() !== 0) {
+      resetSceneWindow();
+      throw new Error("Bitwig's scene window was still scrolled from the previous request. Try again.");
+   }
 
    var trackPlans = {};
    var orderedTrackPlans = [];
@@ -1969,25 +2055,42 @@ function handleRecordLauncherArrangement(request) {
 function handleListClips(request) {
    var params = request.params;
    var track = requireTrack(params);
-   var slots = track.clipLauncherSlotBank();
-   later(120, function() {
-      var clips = [];
-      for (var slotIndex = 0; slotIndex < MAX_SCENES; slotIndex++) {
-         var snapshot = clipSnapshot(slots.getItemAt(slotIndex), slotIndex);
-         if (snapshot.hasContent) clips.push(snapshot);
+   var sceneCount = Math.min(sceneBank.itemCount().get(), MAX_SCENE_SLOTS);
+   var clips = [];
+   function readWindow(windowStart) {
+      if (windowStart >= sceneCount) {
+         finish(request, true, {
+            track: { index: params.trackIndex, name: params.trackName },
+            sceneCount: sceneBank.itemCount().get(),
+            clips: clips
+         });
+         return;
       }
-      finish(request, true, { track: { index: params.trackIndex, name: params.trackName }, clips: clips });
+      withSceneSlot(request, track, windowStart, function(firstSlot, firstLocal) {
+         later(60, function() {
+            var slots = track.clipLauncherSlotBank();
+            var position = windowStart - firstLocal;
+            var end = Math.min(position + MAX_SCENES, sceneCount);
+            for (var slotIndex = windowStart; slotIndex < end; slotIndex++) {
+               var snapshot = clipSnapshot(slots.getItemAt(slotIndex - position), slotIndex);
+               if (snapshot.hasContent) clips.push(snapshot);
+            }
+            readWindow(end);
+         });
+      });
+   }
+   later(120, function() {
+      readWindow(0);
    });
 }
 
 function handleLaunchScene(request) {
-   var slotIndex = Number(request.params.slotIndex);
-   if (!(slotIndex >= 0 && slotIndex < MAX_SCENES) || Math.floor(slotIndex) !== slotIndex) {
-      throw new Error("Scene slot must be between 0 and " + (MAX_SCENES - 1) + ".");
-   }
-   sceneBank.getItemAt(slotIndex).launchWithOptions("none", "from_start");
-   later(180, function() {
-      finish(request, true, { slotIndex: slotIndex, transport: readTransport() });
+   var slotIndex = requireSlotIndex(request.params.slotIndex, "Scene");
+   withSceneSlot(request, null, slotIndex, function(scene) {
+      scene.launchWithOptions("none", "from_start");
+      later(180, function() {
+         finish(request, true, { slotIndex: slotIndex, transport: readTransport() });
+      });
    });
 }
 
@@ -2512,6 +2615,8 @@ function init() {
    transport = host.createTransport();
    trackBank = host.createMainTrackBank(MAX_TRACKS, 0, MAX_SCENES);
    sceneBank = trackBank.sceneBank();
+   interested(sceneBank.itemCount());
+   interested(sceneBank.scrollPosition());
    cursorTrack = host.createCursorTrack("CONTROL_DECK_TRACK_CURSOR", "Control Deck Track Cursor", 0, MAX_SCENES, true);
    cursorDevice = cursorTrack.createCursorDevice();
    cursorDeviceSlot = cursorDevice.getCursorSlot();
