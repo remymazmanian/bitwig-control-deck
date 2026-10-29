@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A reply too large for one message could silently never arrive, and the client only saw a timeout. The bridge now checks every reply against a 60,000-byte limit (the same limit the client uses for requests) and sends a clear error instead. If Bitwig cannot send a reply at all, the bridge logs it as an error and tries to tell the client with a short error reply.
 - After a request timed out or failed, its remaining delayed steps kept running. They could keep changing Bitwig, and an error in one of them could fail the next, unrelated request. Those steps are now dropped once their request has been answered.
 
 ## [1.1.0] - 2026-10-28
