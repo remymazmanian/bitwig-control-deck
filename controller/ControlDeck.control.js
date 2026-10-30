@@ -668,18 +668,43 @@ function processNextRequest() {
    requestBusy = true;
    var request = requestQueue.shift();
    currentRequest = request;
-   host.scheduleTask(function() {
-      if (!request.done) {
-         finish(request, false, {
-            message: "Bitwig did not finish " + request.method + " within " + request.limitMs + " ms. The bridge has recovered and is ready for the next request."
-         });
+   // Polled on a short delay. One long timer can fail to run while a print is
+   // scheduling itself every few milliseconds, which left the caller hanging.
+   request.deadlineAt = Date.now() + request.limitMs;
+   function watch() {
+      if (request.done) return;
+      if (Date.now() >= request.deadlineAt) {
+         giveUp(request);
+         return;
       }
+      host.scheduleTask(watch, 200);
+   }
+   host.scheduleTask(watch, 200);
+   host.scheduleTask(function() {
+      if (!request.done) giveUp(request);
    }, request.limitMs);
    try {
       dispatch(request);
    } catch (error) {
       finish(request, false, { message: String(error.message || error) });
    }
+}
+
+function giveUp(request) {
+   if (request.done) return;
+   if (request.opensBrowser && popupBrowser) {
+      try {
+         if (popupBrowser.exists().get()) popupBrowser.cancel();
+      } catch (error) {
+         host.errorln("Control Deck could not close the browser after a timeout: " + error);
+      }
+   }
+   finish(request, false, {
+      message: "Timed out: " + request.method + " did not finish within " + request.limitMs +
+         " ms. The rest of the request was dropped. If it had started the transport or changed record-arm, those are put back and the transport is stopped.",
+      timedOut: true,
+      limitMs: request.limitMs
+   });
 }
 
 function enqueue(source, id, method, params, timeoutMs) {
@@ -695,7 +720,9 @@ function enqueue(source, id, method, params, timeoutMs) {
       method: method,
       params: params || {},
       deadline: hasTimeout ? Date.now() + clientTimeout : Infinity,
-      limitMs: hasTimeout ? Math.max(1000, clientTimeout + 1000) : DEFAULT_REQUEST_LIMIT_MS
+      // Give up when the client said it would, so the timeout reply arrives
+      // while the client is still waiting (it waits a little longer than this).
+      limitMs: hasTimeout ? Math.max(1, clientTimeout) : DEFAULT_REQUEST_LIMIT_MS
    });
    processNextRequest();
 }
@@ -755,6 +782,7 @@ function selectFilterValue(request, label, bank, value, callback) {
 }
 
 function prepareBrowser(request, params, callback) {
+   request.opensBrowser = true;
    cursorTrack.endOfDeviceChainInsertionPoint().browse();
    later(280, function() {
       try {

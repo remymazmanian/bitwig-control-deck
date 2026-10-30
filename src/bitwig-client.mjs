@@ -11,6 +11,10 @@ export const TOKEN_FILE = new URL("../data/bridge-token", import.meta.url);
 export const SEND_BUFFER_BYTES = 65536;
 // Largest request packet the client will try to send to Bitwig.
 export const MAX_PACKET_BYTES = 60000;
+// The bridge gives up at timeoutMs. The client waits a little longer so that
+// timeout, including its transport and record-arm cleanup, is the error the
+// caller sees rather than a disconnect.
+export const BRIDGE_TIMEOUT_GRACE_MS = 1500;
 
 // The per-install secret shared with the Bitwig controller script. Created by
 // `npm run setup`; never committed.
@@ -74,11 +78,15 @@ export class BitwigClient {
   async request(method, params = {}, timeoutMs = this.timeoutMs) {
     await this.readyPromise;
     const id = randomUUID();
+    const waitMs = timeoutMs + BRIDGE_TIMEOUT_GRACE_MS;
     const response = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Bitwig did not answer ${method} within ${timeoutMs} ms. Make sure Control Deck Bridge is enabled in Bitwig. If it is, run "npm run setup" so the bridge and this client share the same auth token.`));
-      }, timeoutMs);
+        reject(new Error(
+          `Timed out waiting ${waitMs} ms for ${method}. The bridge was asked to stop at ${timeoutMs} ms and to leave the transport stopped and record-arm restored. ` +
+          `If every call times out, enable Control Deck Bridge in Bitwig, or run "npm run setup" so the bridge and this client share the same auth token.`
+        ));
+      }, waitMs);
       this.pending.set(id, { resolve, reject, timer });
     });
 

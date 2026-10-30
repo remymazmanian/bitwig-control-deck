@@ -184,8 +184,9 @@ test("a print that cannot start puts tempo, overdub and arms back", () => {
 
 test("a print the watchdog gives up on is still put back and launches nothing more", () => {
   const { context, responses, advance, state } = setup();
-  // A 10-second client timeout gives the watchdog an 11-second limit, far
-  // shorter than this 512-beat print at 666 BPM.
+  // A 10-second client timeout is also the bridge limit, far shorter than
+  // this 512-beat print at 666 BPM. The client waits slightly longer so it
+  // can receive this timeout.
   context.enqueue(5000, "1", "arrange_launcher_clips", { regions: [region(1, 0, 4), region(0, 500, 12)] }, 10000);
   advance(12000);
   assert.equal(responses.length, 1);
