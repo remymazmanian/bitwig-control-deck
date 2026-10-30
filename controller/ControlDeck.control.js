@@ -47,6 +47,7 @@ var cursorDeviceSlot;
 var cursorRemoteControlsPage;
 var nestedDeviceBank;
 var launcherClip;
+var arrangerClip;
 var sceneBank;
 var popupBrowser;
 var resultColumn;
@@ -1340,6 +1341,56 @@ function handleTransport(request) {
    });
 }
 
+function requireCueMarker(params) {
+   var index = Number(params.index);
+   var name = String(params.name || "");
+   if (!(index >= 0) || Math.floor(index) !== index) throw new Error("Cue marker index must be a whole number from 0 up.");
+   var total = Math.min(cueMarkerBank.itemCount().get(), MAX_CUE_MARKERS);
+   if (index >= total) throw new Error("Cue marker index " + index + " is not available. Refresh with bitwig_cue_markers.");
+   var marker = cueMarkerBank.getItemAt(index);
+   if (!marker.exists().get()) throw new Error("Cue marker " + index + " no longer exists.");
+   var currentName = marker.name().get();
+   if (currentName !== name) {
+      throw new Error("Safety check failed: cue marker " + index + " is now named ‘" + currentName + "’, not ‘" + name + "’. Refresh first.");
+   }
+   return marker;
+}
+
+function handleCueMarkerEdit(request, action) {
+   var marker = requireCueMarker(request.params);
+   var index = Number(request.params.index);
+   if (action === "rename") {
+      var newName = String(request.params.newName || "").trim();
+      if (!newName || newName.length > 120) throw new Error("Cue marker names must be between 1 and 120 characters.");
+      marker.name().set(newName);
+      later(180, function() {
+         var actual = marker.name().get();
+         if (actual !== newName) {
+            finish(request, false, {
+               message: "Bitwig did not rename the cue marker. It is still ‘" + actual + "’.",
+               cueMarkers: listCueMarkers()
+            });
+            return;
+         }
+         finish(request, true, { renamed: true, marker: cueMarkerSnapshot(marker, index), cueMarkers: listCueMarkers() });
+      });
+      return;
+   }
+   var snapshot = cueMarkerSnapshot(marker, index);
+   marker.deleteObject();
+   later(220, function() {
+      var match = cueMarkerAtPosition(snapshot.positionBeats);
+      if (match && match.marker.name().get() === snapshot.name) {
+         finish(request, false, {
+            message: "Bitwig did not delete cue marker ‘" + snapshot.name + "’.",
+            cueMarkers: listCueMarkers()
+         });
+         return;
+      }
+      finish(request, true, { deleted: snapshot, cueMarkers: listCueMarkers() });
+   });
+}
+
 function handleCueMarkers(request) {
    var params = request.params;
    var action = String(params.action || "list");
@@ -1347,7 +1398,11 @@ function handleCueMarkers(request) {
       finish(request, true, listCueMarkers());
       return;
    }
-   if (action !== "upsert") throw new Error("Cue marker action must be list or upsert.");
+   if (action === "rename" || action === "delete") {
+      handleCueMarkerEdit(request, action);
+      return;
+   }
+   if (action !== "upsert") throw new Error("Cue marker action must be list, rename, delete, or upsert.");
 
    var specifications = params.markers || [];
    if (!specifications.length) throw new Error("At least one cue marker is required.");
@@ -2476,6 +2531,158 @@ function handleLaunchScene(request) {
    });
 }
 
+function arrangerClipNavigable() {
+   return !!(arrangerClip && typeof arrangerClip.selectFirst === "function" && typeof arrangerClip.selectNext === "function");
+}
+
+function readArrangerSelection(callback) {
+   if (!arrangerClip || !arrangerClip.exists().get()) {
+      callback(null);
+      return;
+   }
+   var track = arrangerClip.getTrack();
+   interested(track.exists());
+   interested(track.name());
+   interested(track.trackType());
+   later(40, function() {
+      if (!arrangerClip.exists().get()) {
+         callback(null);
+         return;
+      }
+      var trackName = track.exists().get() ? String(track.name().get()) : "";
+      var trackType = track.exists().get() ? String(track.trackType().get()) : "";
+      var kind = "unknown";
+      if (trackType === "Audio") kind = "audio";
+      else if (trackType === "Instrument") kind = "note";
+      else if (trackType === "Hybrid") kind = "hybrid";
+      var indices = trackName ? trackIndicesNamed(trackName) : [];
+      callback({
+         name: null,
+         nameReadable: false,
+         trackName: trackName,
+         trackIndex: indices.length === 1 ? indices[0] : null,
+         trackType: trackType,
+         kind: kind,
+         playStartBeats: arrangerClip.getPlayStart().get(),
+         playStopBeats: arrangerClip.getPlayStop().get(),
+         loopStartBeats: arrangerClip.getLoopStart().get(),
+         loopLengthBeats: arrangerClip.getLoopLength().get(),
+         looping: arrangerClip.isLoopEnabled().get(),
+         stretchMode: null,
+         stretchModeReadable: false
+      });
+   });
+}
+
+function arrangerClipKey(clip) {
+   return clip.trackName + "|" + Number(clip.playStartBeats).toFixed(4) + "|" + Number(clip.playStopBeats).toFixed(4);
+}
+
+var ARRANGER_CLIP_LIMIT_NOTE = "Controller API 18 has no Arranger clip bank. Clip names and stretch or warp mode are not readable. ";
+
+function handleListArrangerClips(request) {
+   if (!arrangerClip) throw new Error("The Arranger clip cursor is not available.");
+   var limit = Number(request.params.limit === undefined ? 128 : request.params.limit);
+   if (!(limit >= 1 && limit <= 128) || Math.floor(limit) !== limit) {
+      throw new Error("Arranger clip limit must be a whole number from 1 to 128.");
+   }
+   if (!arrangerClipNavigable()) {
+      readArrangerSelection(function(clip) {
+         finish(request, true, {
+            scope: "selected",
+            complete: false,
+            navigation: "selected-only",
+            nameReadable: false,
+            stretchModeReadable: false,
+            limit: ARRANGER_CLIP_LIMIT_NOTE + "This host's arranger cursor cannot move to the next clip, so only the selected Arranger clip is listed.",
+            clipCount: clip ? 1 : 0,
+            clips: clip ? [clip] : []
+         });
+      });
+      return;
+   }
+   readArrangerSelection(function(original) {
+      var clips = [];
+      var seen = {};
+      var truncated = false;
+      function restore(then) {
+         if (!original) {
+            then();
+            return;
+         }
+         var originKey = arrangerClipKey(original);
+         var restoreSteps = 0;
+         arrangerClip.selectFirst();
+         function seek() {
+            if (request.done) return;
+            readArrangerSelection(function(clip) {
+               if (request.done) return;
+               if (clip && arrangerClipKey(clip) === originKey) {
+                  then();
+                  return;
+               }
+               var canMove = clip && arrangerClip.hasNext && arrangerClip.hasNext().get() && restoreSteps < limit + 1;
+               if (!canMove) {
+                  then();
+                  return;
+               }
+               restoreSteps++;
+               arrangerClip.selectNext();
+               later(40, seek);
+            });
+         }
+         later(40, seek);
+      }
+      function finishList() {
+         restore(function() {
+            if (request.done) return;
+            finish(request, true, {
+               scope: "arranger",
+               complete: !truncated,
+               navigation: "cursor",
+               nameReadable: false,
+               stretchModeReadable: false,
+               limit: ARRANGER_CLIP_LIMIT_NOTE + "The cursor walked Bitwig's Arranger clip selection and was returned to the clip selected at the start when that clip was still there.",
+               clipCount: clips.length,
+               clips: clips
+            });
+         });
+      }
+      var steps = 0;
+      arrangerClip.selectFirst();
+      function walk() {
+         if (request.done) return;
+         readArrangerSelection(function(clip) {
+            if (request.done) return;
+            if (!clip) {
+               finishList();
+               return;
+            }
+            var key = arrangerClipKey(clip);
+            if (seen[key]) {
+               finishList();
+               return;
+            }
+            seen[key] = true;
+            clips.push(clip);
+            var hasNext = !!(arrangerClip.hasNext && arrangerClip.hasNext().get());
+            if (!hasNext) {
+               finishList();
+               return;
+            }
+            if (clips.length >= limit || steps++ > limit) {
+               truncated = true;
+               finishList();
+               return;
+            }
+            arrangerClip.selectNext();
+            later(40, walk);
+         });
+      }
+      later(40, walk);
+   });
+}
+
 function dispatch(request) {
    var params = request.params;
    switch (request.method) {
@@ -2581,6 +2788,9 @@ function dispatch(request) {
          return;
       case "list_clips":
          handleListClips(request);
+         return;
+      case "list_arranger_clips":
+         handleListArrangerClips(request);
          return;
       case "launch_scene":
          handleLaunchScene(request);
@@ -2971,6 +3181,7 @@ function init() {
    deviceBank = cursorTrack.createDeviceBank(MAX_DEVICES);
    launcherClip = host.createLauncherCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
    launcherClip.addNoteStepObserver(onLauncherNoteStep);
+   arrangerClip = host.createArrangerCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
 
    interested(application.projectName());
    interested(arranger.areCueMarkersVisible());
@@ -3019,6 +3230,12 @@ function init() {
    interested(launcherClip.getPlayStart());
    interested(launcherClip.getPlayStop());
    interested(launcherClip.isLoopEnabled());
+   interested(arrangerClip.exists());
+   interested(arrangerClip.getPlayStart());
+   interested(arrangerClip.getPlayStop());
+   interested(arrangerClip.getLoopStart());
+   interested(arrangerClip.getLoopLength());
+   interested(arrangerClip.isLoopEnabled());
 
    interested(transport.isPlaying());
    interested(transport.isArrangerRecordEnabled());

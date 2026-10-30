@@ -81,13 +81,16 @@ server.registerTool("bitwig_transport", {
 }, async args => call("transport", args));
 
 server.registerTool("bitwig_cue_markers", {
-  description: "List Arranger cue markers, or create/update a named marker set at exact beat positions with Bitwig readback verification.",
+  description: "List Arranger cue markers, create or update a named marker set at exact beat positions, or rename or delete one marker by its index and current name. Writes are read back from Bitwig.",
   inputSchema: {
-    action: z.enum(["list", "upsert"]).default("list"),
+    action: z.enum(["list", "upsert", "rename", "delete"]).default("list"),
     markers: z.array(z.object({
       name: z.string().min(1).max(120),
       positionBeats: z.number().nonnegative()
-    })).min(1).max(64).optional()
+    })).min(1).max(64).optional(),
+    index: z.number().int().nonnegative().optional().describe("Cue marker index returned by action list; required for rename and delete"),
+    name: z.string().min(1).max(120).optional().describe("Exact current cue marker name; required for rename and delete"),
+    newName: z.string().min(1).max(120).optional().describe("Name to set when action is rename")
   }
 }, async args => call("cue_markers", args, 30000));
 
@@ -231,6 +234,13 @@ server.registerTool("bitwig_arrange_launcher_clips", {
     restoreTempo: z.number().min(20).max(666).optional().describe("Tempo to set after recording; defaults to the project's tempo before recording")
   }
 }, async args => call("arrange_launcher_clips", args, 120000));
+
+server.registerTool("bitwig_arranger_clips", {
+  description: "List Arranger clips the Controller API 18 cursor can see: track, start and end beat, and whether the track holds audio or notes. Clip names and stretch mode are not readable. If the host cursor cannot move, only the selected Arranger clip is returned.",
+  inputSchema: {
+    limit: z.number().int().min(1).max(128).default(128)
+  }
+}, async args => call("list_arranger_clips", args, 60000));
 
 server.registerTool("bitwig_clips", {
   description: "List populated launcher clips in every scene for one exact track.",
