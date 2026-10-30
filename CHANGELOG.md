@@ -4,6 +4,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `bitwig_place_audio_file` reads a WAV, AIFF, or FLAC header and reports how long Raw playback would be at the project tempo. It does not place the file or create a track. Controller API 18 cannot put an audio file on an Arranger beat and then set Raw / no stretch, and `insertFile` follows the same path as a drag and drop, which can tempo-detect and stretch the audio.
+- `bitwig_arranger_clips` lists the Arranger clips the clip cursor can see: track, start beat, end beat, and audio or note from the track type. If the host cursor cannot move, only the selected clip is returned. Names and stretch mode are not readable on API 18, including in the published API surface through version 25.
+- `bitwig_rename_clip` renames a launcher clip and reads the slot name back. An Arranger clip is renamed with `Clip.setName` when the cursor can land on that track and start beat. API 18 has no clip name getter, so an Arranger rename is reported as sent, not verified.
+- `bitwig_write_automation` plays a linear or curved ramp between two beats onto track volume, track pan, a Remote Control, or a direct device parameter, in latch automation-write mode, then checks the value at the playhead. API 18 cannot insert automation breakpoints. A direct parameter that does not follow the playhead fails the call; a Remote Control is the path that Bitwig can touch.
+- `bitwig_find_presets` and `bitwig_load_preset` browse the preset tab for one device, or load an absolute `.bwpreset` or `.vstpreset` file. The device name has to stay the same and the preset name has to change. A plug-in's own preset browser, including instruments that sit on their init patch, is not reachable. A load that replaces the device is undone.
+- `bitwig_cue_markers` can rename or delete one marker by index and current name, and reads the marker list back.
+
+### Fixed
+
+- `bitwig_arrange_launcher_clips` restores record-arm on the tracks that were armed, matched by name. Saving the bank slot could arm a different track after the bank scrolled during the print.
+- A request that runs past its time limit now ends with `Timed out:` from the bridge. The bridge drops the rest of that request, stops the transport and restores record-arm when the request had changed them, and closes a browser the request opened. The client waits slightly past that deadline so this error is what the caller sees.
+
 ## [1.2.1] - 2026-10-28
 
 Fixes security advisories in the dashboard and MCP server dependencies, lists the agents Control Deck works with in the docs and on the Connect page, and clears the dashboard lint errors.

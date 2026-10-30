@@ -25,7 +25,7 @@ Everything runs on your machine and binds only to loopback addresses. Nothing is
 
 ## Design rules
 
-- Device loading uses Bitwig's **Devices** browsing session only. It never searches or loads presets.
+- Device loading uses Bitwig's **Devices** browsing session only. It never searches or loads presets. Preset tools are separate: they use the preset tab for one device, or a `.bwpreset` / `.vstpreset` file, and they do not open a plug-in's own browser.
 - Track and device mutations require both the index and the exact current name.
 - Device insertion is refused when an exact name has multiple matches, unless a Bitwig device-type filter disambiguates it.
 - Third-party parameters use Bitwig's stable direct parameter IDs and are paged to keep messages small.
@@ -34,15 +34,77 @@ Everything runs on your machine and binds only to loopback addresses. Nothing is
 ## Tools
 
 - Status and transport
-- List, create, position, and rename Arranger cue markers with readback verification
+- List, create, position, rename, and delete Arranger cue markers with readback verification
 - Read every note in a launcher clip from Bitwig's step grid
+- Rename a launcher clip, or the Arranger clip the cursor can reach
+- List the Arranger clips the Controller API 18 cursor can see
 - Build Arranger MIDI clips from existing launcher patterns at exact beat positions
+- Record a volume, pan, or Remote Control ramp between two beats
+- Search and load a preset Bitwig has indexed for one device
 - List, create, and safely delete tracks
 - List and safely delete devices
 - Search the Devices browser and insert one exact device
 - Read the full direct parameter list for native and third-party devices
 - Set a parameter by stable ID with readback
 - Open a plug-in/device window
+
+`bitwig_place_audio_file` is in the tool list too. It does not place the file. Controller API 18 cannot put audio on an Arranger beat and then force Raw / no stretch, and importing the file the way a drag does lets Bitwig tempo-detect and stretch it. The tool reports the Raw length at the current tempo and leaves the project alone.
+
+### Examples
+
+Place nothing, and learn the Raw length of a 48 kHz stem at the project tempo:
+
+```json
+{ "tool": "bitwig_place_audio_file", "path": "/Users/me/stems/vocal.wav", "startBeats": 16, "stretchMode": "raw" }
+```
+
+List the Arranger clips the cursor can walk. Names and stretch mode come back as unreadable:
+
+```json
+{ "tool": "bitwig_arranger_clips", "limit": 128 }
+```
+
+Rename the launcher clip in slot 0, then the Arranger clip on Vocals that starts at beat 32:
+
+```json
+{ "tool": "bitwig_rename_clip", "where": "launcher", "trackIndex": 2, "trackName": "Vocals", "slotIndex": 0, "newName": "Verse" }
+```
+
+```json
+{ "tool": "bitwig_rename_clip", "where": "arranger", "trackIndex": 2, "trackName": "Vocals", "startBeats": 32, "newName": "Chorus" }
+```
+
+Fade track volume from silence to unity between beats 16 and 32:
+
+```json
+{ "tool": "bitwig_write_automation", "target": "volume", "trackIndex": 2, "trackName": "Vocals", "startBeats": 16, "endBeats": 32, "from": 0, "to": 0.7, "shape": "linear" }
+```
+
+A curved Remote Control ramp, here a filter cutoff that spends longer near the low value:
+
+```json
+{ "tool": "bitwig_write_automation", "target": "remote", "trackIndex": 0, "trackName": "Keys", "deviceIndex": 0, "deviceName": "Pigments", "pageName": "Filter", "controlName": "Cutoff", "startBeats": 48, "endBeats": 64, "from": 0.2, "to": 0.85, "shape": "curve", "curve": 2 }
+```
+
+Find presets Bitwig has indexed for that device, then load one by exact name:
+
+```json
+{ "tool": "bitwig_find_presets", "trackIndex": 0, "trackName": "Keys", "deviceIndex": 0, "deviceName": "Pigments", "query": "pad" }
+```
+
+```json
+{ "tool": "bitwig_load_preset", "trackIndex": 0, "trackName": "Keys", "deviceIndex": 0, "deviceName": "Pigments", "exactName": "Pad Warm" }
+```
+
+Rename and delete one cue marker:
+
+```json
+{ "tool": "bitwig_cue_markers", "action": "rename", "index": 1, "name": "Drop", "newName": "Chorus" }
+```
+
+```json
+{ "tool": "bitwig_cue_markers", "action": "delete", "index": 0, "name": "Intro" }
+```
 
 ## Requirements
 

@@ -47,6 +47,7 @@ var cursorDeviceSlot;
 var cursorRemoteControlsPage;
 var nestedDeviceBank;
 var launcherClip;
+var arrangerClip;
 var sceneBank;
 var popupBrowser;
 var resultColumn;
@@ -316,6 +317,65 @@ function readTrackMeters(resetAfterRead) {
 // identified by index plus name. When two tracks share the name, a shifted
 // index could land on the wrong one and still pass, so such tracks are refused
 // unless the caller is renaming one of them.
+// Bank items are windows onto a scroll position, not stable tracks. Record-arm
+// is saved by index and name, then put back only on the track that still has
+// that name, so a bank scroll during a print cannot arm a neighbour.
+function captureArmState() {
+   var scroll = trackBank.scrollPosition().get();
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   var arms = [];
+   for (var i = 0; i < count; i++) {
+      var track = trackBank.getItemAt(i);
+      if (!track.exists().get()) continue;
+      arms.push({ index: i, name: track.name().get(), armed: Boolean(track.arm().get()) });
+   }
+   return { scroll: scroll, arms: arms };
+}
+
+function trackForArm(spec, scroll) {
+   if (trackBank.scrollPosition().get() !== scroll) trackBank.scrollPosition().set(scroll);
+   var indexed = trackBank.getItemAt(spec.index);
+   if (indexed && indexed.exists().get() && indexed.name().get() === spec.name) return indexed;
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   for (var i = 0; i < count; i++) {
+      var candidate = trackBank.getItemAt(i);
+      if (candidate.exists().get() && candidate.name().get() === spec.name) return candidate;
+   }
+   return null;
+}
+
+function restoreArmState(saved) {
+   var missing = [];
+   for (var i = 0; i < saved.arms.length; i++) {
+      var spec = saved.arms[i];
+      var track = trackForArm(spec, saved.scroll);
+      if (!track) {
+         missing.push(spec.name);
+         continue;
+      }
+      if (Boolean(track.arm().get()) !== spec.armed) track.arm().set(spec.armed);
+   }
+   return missing;
+}
+
+// curve 1 is a straight ramp. Above 1 the value stays nearer `from` for longer.
+// Below 1 it rises sooner and settles nearer `to`.
+function automationRampValue(from, to, t, curve) {
+   var progress = Number(t);
+   if (!(progress > 0)) progress = 0;
+   if (progress > 1) progress = 1;
+   var power = Number(curve);
+   if (!(power > 0)) power = 1;
+   if (Math.abs(power - 1) > 0.0001) progress = Math.pow(progress, power);
+   return from + (to - from) * progress;
+}
+
+function armedTrackCount(saved) {
+   var count = 0;
+   for (var i = 0; i < saved.arms.length; i++) if (saved.arms[i].armed) count++;
+   return count;
+}
+
 function requireTrack(params, allowDuplicateName) {
    var index = Number(params.trackIndex);
    if (index < 0 || index >= MAX_TRACKS || index >= trackBank.itemCount().get()) {
@@ -621,18 +681,43 @@ function processNextRequest() {
    requestBusy = true;
    var request = requestQueue.shift();
    currentRequest = request;
-   host.scheduleTask(function() {
-      if (!request.done) {
-         finish(request, false, {
-            message: "Bitwig did not finish " + request.method + " within " + request.limitMs + " ms. The bridge has recovered and is ready for the next request."
-         });
+   // Polled on a short delay. One long timer can fail to run while a print is
+   // scheduling itself every few milliseconds, which left the caller hanging.
+   request.deadlineAt = Date.now() + request.limitMs;
+   function watch() {
+      if (request.done) return;
+      if (Date.now() >= request.deadlineAt) {
+         giveUp(request);
+         return;
       }
+      host.scheduleTask(watch, 200);
+   }
+   host.scheduleTask(watch, 200);
+   host.scheduleTask(function() {
+      if (!request.done) giveUp(request);
    }, request.limitMs);
    try {
       dispatch(request);
    } catch (error) {
       finish(request, false, { message: String(error.message || error) });
    }
+}
+
+function giveUp(request) {
+   if (request.done) return;
+   if (request.opensBrowser && popupBrowser) {
+      try {
+         if (popupBrowser.exists().get()) popupBrowser.cancel();
+      } catch (error) {
+         host.errorln("Control Deck could not close the browser after a timeout: " + error);
+      }
+   }
+   finish(request, false, {
+      message: "Timed out: " + request.method + " did not finish within " + request.limitMs +
+         " ms. The rest of the request was dropped. If it had started the transport or changed record-arm, those are put back and the transport is stopped.",
+      timedOut: true,
+      limitMs: request.limitMs
+   });
 }
 
 function enqueue(source, id, method, params, timeoutMs) {
@@ -648,7 +733,9 @@ function enqueue(source, id, method, params, timeoutMs) {
       method: method,
       params: params || {},
       deadline: hasTimeout ? Date.now() + clientTimeout : Infinity,
-      limitMs: hasTimeout ? Math.max(1000, clientTimeout + 1000) : DEFAULT_REQUEST_LIMIT_MS
+      // Give up when the client said it would, so the timeout reply arrives
+      // while the client is still waiting (it waits a little longer than this).
+      limitMs: hasTimeout ? Math.max(1, clientTimeout) : DEFAULT_REQUEST_LIMIT_MS
    });
    processNextRequest();
 }
@@ -708,6 +795,7 @@ function selectFilterValue(request, label, bank, value, callback) {
 }
 
 function prepareBrowser(request, params, callback) {
+   request.opensBrowser = true;
    cursorTrack.endOfDeviceChainInsertionPoint().browse();
    later(280, function() {
       try {
@@ -1265,6 +1353,56 @@ function handleTransport(request) {
    });
 }
 
+function requireCueMarker(params) {
+   var index = Number(params.index);
+   var name = String(params.name || "");
+   if (!(index >= 0) || Math.floor(index) !== index) throw new Error("Cue marker index must be a whole number from 0 up.");
+   var total = Math.min(cueMarkerBank.itemCount().get(), MAX_CUE_MARKERS);
+   if (index >= total) throw new Error("Cue marker index " + index + " is not available. Refresh with bitwig_cue_markers.");
+   var marker = cueMarkerBank.getItemAt(index);
+   if (!marker.exists().get()) throw new Error("Cue marker " + index + " no longer exists.");
+   var currentName = marker.name().get();
+   if (currentName !== name) {
+      throw new Error("Safety check failed: cue marker " + index + " is now named ‘" + currentName + "’, not ‘" + name + "’. Refresh first.");
+   }
+   return marker;
+}
+
+function handleCueMarkerEdit(request, action) {
+   var marker = requireCueMarker(request.params);
+   var index = Number(request.params.index);
+   if (action === "rename") {
+      var newName = String(request.params.newName || "").trim();
+      if (!newName || newName.length > 120) throw new Error("Cue marker names must be between 1 and 120 characters.");
+      marker.name().set(newName);
+      later(180, function() {
+         var actual = marker.name().get();
+         if (actual !== newName) {
+            finish(request, false, {
+               message: "Bitwig did not rename the cue marker. It is still ‘" + actual + "’.",
+               cueMarkers: listCueMarkers()
+            });
+            return;
+         }
+         finish(request, true, { renamed: true, marker: cueMarkerSnapshot(marker, index), cueMarkers: listCueMarkers() });
+      });
+      return;
+   }
+   var snapshot = cueMarkerSnapshot(marker, index);
+   marker.deleteObject();
+   later(220, function() {
+      var match = cueMarkerAtPosition(snapshot.positionBeats);
+      if (match && match.marker.name().get() === snapshot.name) {
+         finish(request, false, {
+            message: "Bitwig did not delete cue marker ‘" + snapshot.name + "’.",
+            cueMarkers: listCueMarkers()
+         });
+         return;
+      }
+      finish(request, true, { deleted: snapshot, cueMarkers: listCueMarkers() });
+   });
+}
+
 function handleCueMarkers(request) {
    var params = request.params;
    var action = String(params.action || "list");
@@ -1272,7 +1410,11 @@ function handleCueMarkers(request) {
       finish(request, true, listCueMarkers());
       return;
    }
-   if (action !== "upsert") throw new Error("Cue marker action must be list or upsert.");
+   if (action === "rename" || action === "delete") {
+      handleCueMarkerEdit(request, action);
+      return;
+   }
+   if (action !== "upsert") throw new Error("Cue marker action must be list, rename, delete, or upsert.");
 
    var specifications = params.markers || [];
    if (!specifications.length) throw new Error("At least one cue marker is required.");
@@ -2160,19 +2302,15 @@ function handleRecordLauncherArrangement(request) {
    if (!(restoreTempo >= 20 && restoreTempo <= 666)) throw new Error("Restore tempo must be between 20 and 666 BPM.");
 
    // Everything the print changes is put back by restoreState, on success, on
-   // any error, and when the watchdog gives up on the request.
+   // any error, and when the watchdog gives up on the request. Arm is stored
+   // by name because bank slots follow the scroll position.
    var saved = {
       loopEnabled: transport.isArrangerLoopEnabled().get(),
       position: transport.getPosition().get(),
       arrangerOverdub: transport.isArrangerOverdubEnabled().get(),
       launcherOverdub: transport.isClipLauncherOverdubEnabled().get(),
-      armedTracks: []
+      arms: captureArmState()
    };
-   var trackCount = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
-   for (var armIndex = 0; armIndex < trackCount; armIndex++) {
-      var candidate = trackBank.getItemAt(armIndex);
-      if (candidate.exists().get() && candidate.arm().get()) saved.armedTracks.push(candidate);
-   }
    var acceleratedTempo = 666;
    var nextEvent = 0;
    var startTimestamp = Date.now();
@@ -2191,12 +2329,17 @@ function handleRecordLauncherArrangement(request) {
       transport.isArrangerLoopEnabled().set(saved.loopEnabled);
       transport.isArrangerOverdubEnabled().set(saved.arrangerOverdub);
       transport.isClipLauncherOverdubEnabled().set(saved.launcherOverdub);
-      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(true);
+      restoreArmState(saved.arms);
       transport.tempo().value().setRaw(restoreTempo);
       transport.setPosition(saved.position);
       // Bitwig drops a playhead move made while the transport is still
-      // stopping, so move it again once the stop has landed.
-      host.scheduleTask(function() { transport.setPosition(saved.position); }, 200);
+      // stopping, so move it again once the stop has landed. Arm is applied
+      // again after the bank scroll has settled, so a slot that still showed
+      // the wrong track cannot keep the arm.
+      host.scheduleTask(function() {
+         transport.setPosition(saved.position);
+         restoreArmState(saved.arms);
+      }, 200);
    }
    request.cleanup = restoreState;
 
@@ -2222,7 +2365,7 @@ function handleRecordLauncherArrangement(request) {
             acceleratedTempo: acceleratedTempo,
             restoredTempo: transport.tempo().value().getRaw(),
             restoredPositionBeats: transport.getPosition().get(),
-            restoredArmedTracks: saved.armedTracks.length,
+            restoredArmedTracks: armedTrackCount(saved.arms),
             durationMs: Date.now() - startTimestamp,
             intervals: recordedIntervals,
             projectModified: project.isModified().get(),
@@ -2267,8 +2410,11 @@ function handleRecordLauncherArrangement(request) {
    }
 
    function stillArmed() {
-      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) {
-         if (saved.armedTracks[armIndex].arm().get()) return true;
+      for (var armIndex = 0; armIndex < saved.arms.arms.length; armIndex++) {
+         var spec = saved.arms.arms[armIndex];
+         if (!spec.armed) continue;
+         var track = trackForArm(spec, saved.arms.scroll);
+         if (track && track.arm().get()) return true;
       }
       return false;
    }
@@ -2284,7 +2430,12 @@ function handleRecordLauncherArrangement(request) {
       transport.isArrangerLoopEnabled().set(false);
       transport.isArrangerOverdubEnabled().set(false);
       transport.isClipLauncherOverdubEnabled().set(false);
-      for (var unarmIndex = 0; unarmIndex < saved.armedTracks.length; unarmIndex++) saved.armedTracks[unarmIndex].arm().set(false);
+      for (var unarmIndex = 0; unarmIndex < saved.arms.arms.length; unarmIndex++) {
+         var armedSpec = saved.arms.arms[unarmIndex];
+         if (!armedSpec.armed) continue;
+         var armedTrack = trackForArm(armedSpec, saved.arms.scroll);
+         if (armedTrack) armedTrack.arm().set(false);
+      }
       for (var stopIndex = 0; stopIndex < orderedTrackPlans.length; stopIndex++) orderedTrackPlans[stopIndex].track.stop();
       transport.tempo().value().setRaw(acceleratedTempo);
       moveToStart();
@@ -2319,7 +2470,12 @@ function handleRecordLauncherArrangement(request) {
             return;
          }
          if (stillArmed()) {
-            for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(false);
+            for (var armIndex = 0; armIndex < saved.arms.arms.length; armIndex++) {
+               var retrySpec = saved.arms.arms[armIndex];
+               if (!retrySpec.armed) continue;
+               var retryTrack = trackForArm(retrySpec, saved.arms.scroll);
+               if (retryTrack) retryTrack.arm().set(false);
+            }
             retryOr("Bitwig did not disarm the armed tracks for recording.");
             return;
          }
@@ -2383,6 +2539,764 @@ function handleLaunchScene(request) {
       scene.launchWithOptions("none", "from_start");
       later(180, function() {
          finish(request, true, { slotIndex: slotIndex, transport: readTransport() });
+      });
+   });
+}
+
+function arrangerClipNavigable() {
+   return !!(arrangerClip && typeof arrangerClip.selectFirst === "function" && typeof arrangerClip.selectNext === "function");
+}
+
+function readArrangerSelection(callback) {
+   if (!arrangerClip || !arrangerClip.exists().get()) {
+      callback(null);
+      return;
+   }
+   var track = arrangerClip.getTrack();
+   interested(track.exists());
+   interested(track.name());
+   interested(track.trackType());
+   later(40, function() {
+      if (!arrangerClip.exists().get()) {
+         callback(null);
+         return;
+      }
+      var trackName = track.exists().get() ? String(track.name().get()) : "";
+      var trackType = track.exists().get() ? String(track.trackType().get()) : "";
+      var kind = "unknown";
+      if (trackType === "Audio") kind = "audio";
+      else if (trackType === "Instrument") kind = "note";
+      else if (trackType === "Hybrid") kind = "hybrid";
+      var indices = trackName ? trackIndicesNamed(trackName) : [];
+      callback({
+         name: null,
+         nameReadable: false,
+         trackName: trackName,
+         trackIndex: indices.length === 1 ? indices[0] : null,
+         trackType: trackType,
+         kind: kind,
+         playStartBeats: arrangerClip.getPlayStart().get(),
+         playStopBeats: arrangerClip.getPlayStop().get(),
+         loopStartBeats: arrangerClip.getLoopStart().get(),
+         loopLengthBeats: arrangerClip.getLoopLength().get(),
+         looping: arrangerClip.isLoopEnabled().get(),
+         stretchMode: null,
+         stretchModeReadable: false
+      });
+   });
+}
+
+function arrangerClipKey(clip) {
+   return clip.trackName + "|" + Number(clip.playStartBeats).toFixed(4) + "|" + Number(clip.playStopBeats).toFixed(4);
+}
+
+var ARRANGER_CLIP_LIMIT_NOTE = "Controller API 18 has no Arranger clip bank. Clip names and stretch or warp mode are not readable. ";
+
+function handleListArrangerClips(request) {
+   if (!arrangerClip) throw new Error("The Arranger clip cursor is not available.");
+   var limit = Number(request.params.limit === undefined ? 128 : request.params.limit);
+   if (!(limit >= 1 && limit <= 128) || Math.floor(limit) !== limit) {
+      throw new Error("Arranger clip limit must be a whole number from 1 to 128.");
+   }
+   if (!arrangerClipNavigable()) {
+      readArrangerSelection(function(clip) {
+         finish(request, true, {
+            scope: "selected",
+            complete: false,
+            navigation: "selected-only",
+            nameReadable: false,
+            stretchModeReadable: false,
+            limit: ARRANGER_CLIP_LIMIT_NOTE + "This host's arranger cursor cannot move to the next clip, so only the selected Arranger clip is listed.",
+            clipCount: clip ? 1 : 0,
+            clips: clip ? [clip] : []
+         });
+      });
+      return;
+   }
+   readArrangerSelection(function(original) {
+      var clips = [];
+      var seen = {};
+      var truncated = false;
+      function restore(then) {
+         if (!original) {
+            then();
+            return;
+         }
+         var originKey = arrangerClipKey(original);
+         var restoreSteps = 0;
+         arrangerClip.selectFirst();
+         function seek() {
+            if (request.done) return;
+            readArrangerSelection(function(clip) {
+               if (request.done) return;
+               if (clip && arrangerClipKey(clip) === originKey) {
+                  then();
+                  return;
+               }
+               var canMove = clip && arrangerClip.hasNext && arrangerClip.hasNext().get() && restoreSteps < limit + 1;
+               if (!canMove) {
+                  then();
+                  return;
+               }
+               restoreSteps++;
+               arrangerClip.selectNext();
+               later(40, seek);
+            });
+         }
+         later(40, seek);
+      }
+      function finishList() {
+         restore(function() {
+            if (request.done) return;
+            finish(request, true, {
+               scope: "arranger",
+               complete: !truncated,
+               navigation: "cursor",
+               nameReadable: false,
+               stretchModeReadable: false,
+               limit: ARRANGER_CLIP_LIMIT_NOTE + "The cursor walked Bitwig's Arranger clip selection and was returned to the clip selected at the start when that clip was still there.",
+               clipCount: clips.length,
+               clips: clips
+            });
+         });
+      }
+      var steps = 0;
+      arrangerClip.selectFirst();
+      function walk() {
+         if (request.done) return;
+         readArrangerSelection(function(clip) {
+            if (request.done) return;
+            if (!clip) {
+               finishList();
+               return;
+            }
+            var key = arrangerClipKey(clip);
+            if (seen[key]) {
+               finishList();
+               return;
+            }
+            seen[key] = true;
+            clips.push(clip);
+            var hasNext = !!(arrangerClip.hasNext && arrangerClip.hasNext().get());
+            if (!hasNext) {
+               finishList();
+               return;
+            }
+            if (clips.length >= limit || steps++ > limit) {
+               truncated = true;
+               finishList();
+               return;
+            }
+            arrangerClip.selectNext();
+            later(40, walk);
+         });
+      }
+      later(40, walk);
+   });
+}
+
+var MAX_AUTOMATION_BEATS = 256;
+
+function parameterTarget(parameter, label) {
+   return {
+      label: label,
+      direct: false,
+      read: function() { return Number(parameter.get()); },
+      write: function(value) { parameter.set(value); },
+      touch: function(on) { parameter.touch(Boolean(on)); },
+      restore: function() { parameter.restoreAutomationControl(); }
+   };
+}
+
+function directParameterTarget(device, id) {
+   return {
+      label: directNames[id] || id,
+      direct: true,
+      read: function() { return Number(directValues[id]); },
+      write: function(value) {
+         var resolution = 128;
+         device.setDirectParameterValueNormalized(id, Math.round(Number(value) * (resolution - 1)), resolution);
+      },
+      touch: function() {},
+      restore: function() {}
+   };
+}
+
+function resolveAutomationTarget(request, callback) {
+   var params = request.params;
+   var target = String(params.target || "");
+   if (target === "volume" || target === "pan") {
+      var track = requireTrack(params);
+      callback(parameterTarget(target === "volume" ? track.volume() : track.pan(), target));
+      return;
+   }
+   if (target !== "remote" && target !== "parameter") throw new Error("Automation target must be volume, pan, remote, or parameter.");
+   selectDevice(request, params, function(device) {
+      try {
+         if (target === "parameter") {
+            var id = String(params.parameterId || "");
+            if (!directIds || directIds.indexOf(id) === -1) {
+               throw new Error("Parameter ID ‘" + id + "’ is not exposed by the selected device. Refresh its parameters.");
+            }
+            callback(directParameterTarget(device, id));
+            return;
+         }
+         var pageNames = arrayCopy(cursorRemoteControlsPage.pageNames().get());
+         var pageIndex = params.pageIndex === undefined ? pageNames.indexOf(String(params.pageName || "")) : Number(params.pageIndex);
+         if (!(pageIndex >= 0 && pageIndex < pageNames.length)) throw new Error("Remote Controls page was not found.");
+         cursorRemoteControlsPage.selectedPageIndex().set(pageIndex);
+         later(200, function() {
+            try {
+               var controlIndex = params.controlIndex === undefined ? -1 : Number(params.controlIndex);
+               if (controlIndex < 0 && params.controlName !== undefined) {
+                  var requestedName = String(params.controlName);
+                  for (var i = 0; i < 8; i++) {
+                     if (cursorRemoteControlsPage.getParameter(i).name().get() === requestedName) {
+                        controlIndex = i;
+                        break;
+                     }
+                  }
+               }
+               if (!(controlIndex >= 0 && controlIndex < 8)) throw new Error("Remote control was not found on page ‘" + pageNames[pageIndex] + "’.");
+               var control = cursorRemoteControlsPage.getParameter(controlIndex);
+               if (!control.exists().get()) throw new Error("The requested Remote Control slot is empty.");
+               callback(parameterTarget(control, control.name().get()));
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
+      } catch (error) {
+         finish(request, false, { message: String(error.message || error) });
+      }
+   });
+}
+
+function handleWriteAutomation(request) {
+   var params = request.params;
+   var from = Number(params.from);
+   var to = Number(params.to);
+   var startBeats = Number(params.startBeats);
+   var endBeats = Number(params.endBeats);
+   var shape = String(params.shape || "linear");
+   var curve = params.curve === undefined || params.curve === null ? 1 : Number(params.curve);
+   if (!(from >= 0 && from <= 1) || !(to >= 0 && to <= 1)) throw new Error("Automation values must be between 0 and 1.");
+   if (!(startBeats >= 0) || !(endBeats > startBeats)) throw new Error("Automation end beat must be greater than the start beat.");
+   var span = endBeats - startBeats;
+   if (span > MAX_AUTOMATION_BEATS) throw new Error("One automation pass can cover at most " + MAX_AUTOMATION_BEATS + " beats.");
+   if (shape !== "linear" && shape !== "curve") throw new Error("Automation shape must be linear or curve.");
+   if (shape === "linear") curve = 1;
+   if (!(curve >= 0.25 && curve <= 4)) throw new Error("Automation curve must be between 0.25 and 4.");
+
+   resolveAutomationTarget(request, function(target) {
+      var saved = {
+         loopEnabled: transport.isArrangerLoopEnabled().get(),
+         position: transport.getPosition().get(),
+         tempo: transport.tempo().value().getRaw(),
+         arrangerOverdub: transport.isArrangerOverdubEnabled().get(),
+         launcherOverdub: transport.isClipLauncherOverdubEnabled().get(),
+         record: transport.isArrangerRecordEnabled().get(),
+         writeEnabled: transport.isArrangerAutomationWriteEnabled().get(),
+         writeMode: String(transport.automationWriteMode().get()),
+         arms: captureArmState(),
+         value: target.read()
+      };
+      var writeSeconds = Math.min(16, Math.max(4, span * 0.2));
+      var tempo = span * 60 / writeSeconds;
+      if (tempo < 20) tempo = 20;
+      if (tempo > 666) tempo = 666;
+      var completed = false;
+      var settled = false;
+      var restored = false;
+
+      function restoreState() {
+         if (restored) {
+            restoreArmState(saved.arms);
+            return;
+         }
+         restored = true;
+         try { target.touch(false); } catch (error) { host.errorln("Control Deck could not release the automated parameter: " + error); }
+         try { target.restore(); } catch (error) { host.errorln("Control Deck could not return the parameter to its automation: " + error); }
+         transport.stop();
+         transport.isArrangerRecordEnabled().set(saved.record);
+         transport.isArrangerAutomationWriteEnabled().set(saved.writeEnabled);
+         transport.automationWriteMode().set(saved.writeMode);
+         transport.isArrangerLoopEnabled().set(saved.loopEnabled);
+         transport.isArrangerOverdubEnabled().set(saved.arrangerOverdub);
+         transport.isClipLauncherOverdubEnabled().set(saved.launcherOverdub);
+         transport.tempo().value().setRaw(saved.tempo);
+         restoreArmState(saved.arms);
+         transport.setPosition(saved.position);
+         host.scheduleTask(function() {
+            transport.setPosition(saved.position);
+            restoreArmState(saved.arms);
+         }, 200);
+      }
+      request.cleanup = restoreState;
+
+      function fail(error) {
+         if (settled) return;
+         settled = true;
+         completed = true;
+         if (target.direct) {
+            try { target.write(saved.value); } catch (restoreError) { host.errorln("Control Deck could not restore the parameter: " + restoreError); }
+         }
+         restoreState();
+         finish(request, false, { message: String(error.message || error) });
+      }
+
+      function disarm() {
+         for (var i = 0; i < saved.arms.arms.length; i++) {
+            var spec = saved.arms.arms[i];
+            if (!spec.armed) continue;
+            var armedTrack = trackForArm(spec, saved.arms.scroll);
+            if (armedTrack) armedTrack.arm().set(false);
+         }
+      }
+
+      try {
+         transport.stop();
+         transport.isArrangerRecordEnabled().set(false);
+         transport.isArrangerLoopEnabled().set(false);
+         transport.isArrangerOverdubEnabled().set(false);
+         transport.isClipLauncherOverdubEnabled().set(false);
+         disarm();
+         transport.tempo().value().setRaw(tempo);
+         transport.automationWriteMode().set("latch");
+         transport.isArrangerAutomationWriteEnabled().set(true);
+         transport.setPosition(startBeats);
+         target.touch(true);
+         target.write(from);
+      } catch (error) {
+         fail(error);
+         return;
+      }
+
+      var preparationAttempts = 0;
+      function begin() {
+         if (completed || restored) return;
+         try {
+            if (Math.abs(transport.tempo().value().getRaw() - tempo) > 0.05 ||
+               Math.abs(transport.getPosition().get() - startBeats) > 0.05 ||
+               !transport.isArrangerAutomationWriteEnabled().get() ||
+               transport.isArrangerLoopEnabled().get()) {
+               if (preparationAttempts++ > 20) throw new Error("Bitwig did not get ready to record the automation ramp.");
+               transport.tempo().value().setRaw(tempo);
+               transport.isArrangerAutomationWriteEnabled().set(true);
+               transport.isArrangerLoopEnabled().set(false);
+               transport.setPosition(startBeats);
+               later(80, begin);
+               return;
+            }
+            transport.play();
+            later(40, monitor);
+         } catch (error) {
+            fail(error);
+         }
+      }
+
+      function monitor() {
+         if (completed || restored) return;
+         try {
+            var position = transport.getPosition().get();
+            if (position >= endBeats) {
+               target.write(to);
+               verifyThenFinish();
+               return;
+            }
+            target.write(automationRampValue(from, to, (position - startBeats) / span, curve));
+            if (!transport.isPlaying().get()) {
+               throw new Error("Bitwig's transport stopped at beat " + position + " before the automation reached beat " + endBeats + ".");
+            }
+            later(20, monitor);
+         } catch (error) {
+            fail(error);
+         }
+      }
+
+      function verifyThenFinish() {
+         if (completed || settled) return;
+         completed = true;
+         try { target.touch(false); } catch (error) { host.errorln("Control Deck could not release the automated parameter: " + error); }
+         try { target.restore(); } catch (error) { host.errorln("Control Deck could not return the parameter to its automation: " + error); }
+         transport.stop();
+         transport.isArrangerAutomationWriteEnabled().set(false);
+         transport.setPosition(startBeats);
+         later(200, function() {
+            if (request.done) return;
+            try {
+               var startActual = target.read();
+               var endAt = Math.max(startBeats, endBeats - 0.01);
+               transport.setPosition(endAt);
+               later(200, function() {
+                  if (request.done) return;
+                  try {
+                     var endActual = target.read();
+                     var startOk = !differs(startActual, from, 0.08);
+                     var endOk = !differs(endActual, to, 0.08);
+                        if (!startOk || !endOk) {
+                           if (settled) return;
+                           settled = true;
+                           if (target.direct) target.write(saved.value);
+                           restoreState();
+                        var why = target.direct
+                           ? " Controller API 18 cannot touch a direct parameter, so plug-in parameters such as filter cutoff record only when a Remote Control is aimed at them."
+                           : " The ramp is played into the arranger lane; Controller API 18 cannot write automation breakpoints.";
+                        finish(request, false, {
+                           message: "Bitwig did not confirm the automation ramp. At beat " + startBeats + " the value is " + startActual +
+                              " (requested " + from + "); near beat " + endBeats + " it is " + endActual + " (requested " + to + ")." + why,
+                           startValue: startActual,
+                           endValue: endActual,
+                           verified: false
+                        });
+                        return;
+                     }
+                     if (settled) return;
+                     settled = true;
+                     restoreState();
+                     later(220, function() {
+                        finish(request, true, {
+                           target: target.label,
+                           directParameter: target.direct,
+                           shape: shape,
+                           curve: curve,
+                           startBeats: startBeats,
+                           endBeats: endBeats,
+                           from: from,
+                           to: to,
+                           startValue: startActual,
+                           endValue: endActual,
+                           verified: true,
+                           tempoDuringPass: tempo,
+                           restoredTempo: transport.tempo().value().getRaw(),
+                           limit: "Recorded by playing the parameter in latch mode. Controller API 18 cannot insert automation breakpoints, and it cannot read the lane back except as the value at the playhead."
+                        });
+                     });
+                  } catch (error) {
+                     fail(error);
+                  }
+               });
+            } catch (error) {
+               fail(error);
+            }
+         });
+      }
+
+      later(300, begin);
+   });
+}
+
+function handleRenameClip(request) {
+   var params = request.params;
+   var newName = String(params.newName || "").trim();
+   if (!newName || newName.length > 120) throw new Error("Clip names must be between 1 and 120 characters.");
+   var where = String(params.where || "");
+   if (where === "launcher") {
+      var slotIndex = requireSlotIndex(params.slotIndex, "Clip");
+      selectTrack(request, params, function(track) {
+         withSceneSlot(request, track, slotIndex, function(slot) {
+            if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip to rename.");
+            slot.select();
+            later(160, function() {
+               try {
+                  if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
+                  launcherClip.setName(newName);
+                  later(180, function() {
+                     var actual = slot.name().get();
+                     if (actual !== newName) {
+                        finish(request, false, { message: "Bitwig did not rename the launcher clip. It is still ‘" + actual + "’." });
+                        return;
+                     }
+                     finish(request, true, {
+                        where: "launcher",
+                        renamed: true,
+                        verified: true,
+                        clip: clipSnapshot(slot, slotIndex)
+                     });
+                  });
+               } catch (error) {
+                  finish(request, false, { message: String(error.message || error) });
+               }
+            });
+         });
+      });
+      return;
+   }
+   if (where !== "arranger") throw new Error("Clip location must be launcher or arranger.");
+   if (!arrangerClip) throw new Error("The Arranger clip cursor is not available.");
+   var startBeats = Number(params.startBeats);
+   if (!(startBeats >= 0)) throw new Error("Arranger clip start must be zero or greater.");
+   function matches(clip) {
+      return !!(clip && clip.trackName === String(params.trackName) && Math.abs(clip.playStartBeats - startBeats) < 0.001);
+   }
+   function apply() {
+      arrangerClip.setName(newName);
+      later(180, function() {
+         var readable = typeof arrangerClip.name === "function";
+         var actual = readable ? String(arrangerClip.name().get()) : null;
+         var verified = readable && actual === newName;
+         finish(request, true, {
+            where: "arranger",
+            renamed: true,
+            verified: verified,
+            name: verified ? actual : null,
+            nameReadable: readable,
+            trackName: String(params.trackName),
+            startBeats: startBeats,
+            limit: verified ? undefined : "Controller API 18's Clip has setName but no name getter, so the Arranger rename was sent and could not be read back."
+         });
+      });
+   }
+   function miss(clip) {
+      var selected = clip ? clip.trackName + " at beat " + clip.playStartBeats : "no clip";
+      finish(request, false, {
+         message: "No Arranger clip on ‘" + params.trackName + "’ starts at beat " + startBeats +
+            ". Controller API 18 can rename only the clip the arranger cursor is on" +
+            (arrangerClipNavigable() ? ", and walking that cursor did not find it." : ", and this host cannot move that cursor. Select the clip in Bitwig and try again.") +
+            " The cursor is on " + selected + ".",
+         verified: false
+      });
+   }
+   if (!arrangerClipNavigable()) {
+      readArrangerSelection(function(clip) {
+         if (!matches(clip)) miss(clip);
+         else apply();
+      });
+      return;
+   }
+   var steps = 0;
+   arrangerClip.selectFirst();
+   function walk() {
+      if (request.done) return;
+      readArrangerSelection(function(clip) {
+         if (request.done) return;
+         if (matches(clip)) {
+            apply();
+            return;
+         }
+         var hasNext = !!(clip && arrangerClip.hasNext && arrangerClip.hasNext().get());
+         if (!hasNext || steps++ > 128) {
+            miss(clip);
+            return;
+         }
+         arrangerClip.selectNext();
+         later(40, walk);
+      });
+   }
+   later(40, walk);
+}
+
+function presetContentTypeIndex(names) {
+   var fuzzy = -1;
+   for (var i = 0; i < names.length; i++) {
+      var name = normalizeText(names[i]);
+      if (name === "presets" || name === "preset") return i;
+      if (fuzzy < 0 && name.indexOf("preset") !== -1) fuzzy = i;
+   }
+   return fuzzy;
+}
+
+var PRESET_LIMIT = "Bitwig's preset browser lists presets it has indexed for this device, including .bwpreset files and VST3 programs the plug-in exposes to the host. It cannot open a plug-in's own preset browser, so an instrument that only shows its init patch there stays on that patch until a Bitwig-indexed preset is loaded.";
+
+function handlePlaceAudioFile(request) {
+   var params = request.params;
+   var mode = String(params.stretchMode || "raw");
+   if (mode !== "raw") {
+      throw new Error("Controller API 18 cannot set an audio clip's stretch mode. Control Deck did not place the file.");
+   }
+   var duration = Number(params.durationSeconds);
+   if (!(duration > 0)) throw new Error("Audio duration must be greater than zero. The file was not placed.");
+   var tempo = transport.tempo().value().getRaw();
+   var beats = duration * tempo / 60;
+   var sampleRate = params.sampleRate === undefined ? "unknown" : params.sampleRate;
+   var bitDepth = params.bitDepth === undefined ? "unknown" : params.bitDepth;
+   var roundedBeats = Math.round(beats * 1000) / 1000;
+   var roundedSeconds = Math.round(duration * 1000) / 1000;
+   finish(request, false, {
+      placed: false,
+      stretchMode: "raw",
+      stretchModeApplied: false,
+      apiVersion: 18,
+      durationSeconds: duration,
+      sampleRate: params.sampleRate,
+      bitDepth: params.bitDepth,
+      projectTempo: tempo,
+      startBeats: Number(params.startBeats),
+      rawLengthBeats: beats,
+      message: "Control Deck did not place the audio file. Controller API 18 cannot put a file on an Arranger clip at a beat, and Clip has no stretch, warp, or Raw playback control (still absent from the published API through version 25). " +
+         "insertFile uses the same path as a drag and drop, which lets Bitwig detect tempo and stretch the audio, so nothing was inserted and no track was created. " +
+         "At " + tempo + " BPM, Raw playback of this " + sampleRate + " Hz / " + bitDepth + "-bit file would be " +
+         roundedBeats + " beats (" + roundedSeconds + " seconds), starting at beat " + params.startBeats + "."
+   });
+}
+
+function handleFindPresets(request) {
+   var params = request.params;
+   selectDevice(request, params, function(device) {
+      var before = String(device.presetName().get() || "");
+      var deviceName = String(device.name().get() || "");
+      request.opensBrowser = true;
+      try { popupBrowser.shouldAudition().set(false); } catch (error) { /* audition toggle is best-effort */ }
+      device.replaceDeviceInsertionPoint().browse();
+      later(280, function() {
+         try {
+            if (!popupBrowser.exists().get()) throw new Error("Bitwig did not open its preset browser.");
+            try { popupBrowser.shouldAudition().set(false); } catch (error) { /* already attempted */ }
+            var types = arrayCopy(popupBrowser.contentTypeNames().get());
+            var index = presetContentTypeIndex(types);
+            if (index < 0) {
+               popupBrowser.cancel();
+               finish(request, false, {
+                  message: "Bitwig's browser for ‘" + deviceName + "’ has no Presets tab. Available: " + types.join(", ") + ". " + PRESET_LIMIT,
+                  contentTypes: types
+               });
+               return;
+            }
+            popupBrowser.selectedContentTypeIndex().set(index);
+            later(200, function() {
+               var limit = Number(params.limit || 50);
+               scanBrowserResults(request, String(params.query || ""), false, limit, function(matches, total) {
+                  popupBrowser.cancel();
+                  later(120, function() {
+                     var after = String(device.presetName().get() || "");
+                     if (after !== before) {
+                        try { application.undo(); } catch (error) { host.errorln("Control Deck could not undo a preset audition: " + error); }
+                        finish(request, false, { message: "Browsing changed the preset from ‘" + before + "’ to ‘" + after + "’. Undo was used. Nothing was loaded on purpose." });
+                        return;
+                     }
+                     finish(request, true, {
+                        device: deviceName,
+                        presetName: before,
+                        totalPresets: total,
+                        returned: Math.min(matches.length, limit),
+                        matches: matches.slice(0, limit),
+                        limit: PRESET_LIMIT
+                     });
+                  });
+               });
+            });
+         } catch (error) {
+            try { popupBrowser.cancel(); } catch (ignore) { /* browser may already be closed */ }
+            finish(request, false, { message: String(error.message || error) });
+         }
+      });
+   });
+}
+
+function confirmLoadedPreset(request, device, before) {
+   var deviceName = device.name().get();
+   var presetName = String(device.presetName().get() || "");
+   if (deviceName !== before.deviceName) {
+      try { application.undo(); } catch (error) { host.errorln("Control Deck could not undo a device replacement: " + error); }
+      finish(request, false, {
+         message: "Loading the preset replaced ‘" + before.deviceName + "’ with ‘" + deviceName + "’. Undo was used. " + PRESET_LIMIT
+      });
+      return;
+   }
+   if (!presetName || normalizeText(presetName) === normalizeText(before.presetName)) {
+      finish(request, false, {
+         message: "Bitwig did not confirm a new preset on ‘" + deviceName + "’. It is still ‘" + (presetName || "unnamed") + "’. " + PRESET_LIMIT,
+         presetName: presetName
+      });
+      return;
+   }
+   if (before.exactName && normalizeText(presetName) !== normalizeText(before.exactName)) {
+      try { application.undo(); } catch (error) { host.errorln("Control Deck could not undo an unexpected preset: " + error); }
+      finish(request, false, {
+         message: "Bitwig loaded ‘" + presetName + "’ instead of ‘" + before.exactName + "’. Undo was used.",
+         presetName: presetName
+      });
+      return;
+   }
+   finish(request, true, {
+      loaded: true,
+      source: before.source,
+      device: deviceName,
+      presetNameBefore: before.presetName,
+      presetNameAfter: presetName,
+      verifiedByPresetName: true,
+      deviceNameUnchanged: true,
+      limit: PRESET_LIMIT
+   });
+}
+
+function handleLoadPreset(request) {
+   var params = request.params;
+   var exactName = params.exactName ? String(params.exactName) : "";
+   var path = params.path ? String(params.path) : "";
+   if (!exactName && !path) throw new Error("Provide an exact preset name or an absolute .bwpreset or .vstpreset path.");
+   if (exactName && path) throw new Error("Load a preset by name or by path, not both.");
+   if (path && (path.charAt(0) !== "/" || !/\.(bwpreset|vstpreset)$/i.test(path))) {
+      throw new Error("Preset path must be an absolute .bwpreset or .vstpreset file. " + PRESET_LIMIT);
+   }
+   selectDevice(request, params, function(device) {
+      var before = {
+         deviceName: String(device.name().get() || ""),
+         presetName: String(device.presetName().get() || ""),
+         exactName: exactName,
+         source: path ? "file" : "browser"
+      };
+      if (path) {
+         device.replaceDeviceInsertionPoint().insertFile(path);
+         later(1000, function() {
+            try { confirmLoadedPreset(request, device, before); }
+            catch (error) { finish(request, false, { message: String(error.message || error) }); }
+         });
+         return;
+      }
+      request.opensBrowser = true;
+      try { popupBrowser.shouldAudition().set(false); } catch (error) { /* best-effort */ }
+      device.replaceDeviceInsertionPoint().browse();
+      later(280, function() {
+         try {
+            if (!popupBrowser.exists().get()) throw new Error("Bitwig did not open its preset browser.");
+            var types = arrayCopy(popupBrowser.contentTypeNames().get());
+            var index = presetContentTypeIndex(types);
+            if (index < 0) {
+               popupBrowser.cancel();
+               throw new Error("Bitwig's browser for ‘" + before.deviceName + "’ has no Presets tab. Available: " + types.join(", ") + ". " + PRESET_LIMIT);
+            }
+            popupBrowser.selectedContentTypeIndex().set(index);
+            later(200, function() {
+               scanBrowserResults(request, exactName, true, 20, function(matches) {
+                  if (matches.length === 0) {
+                     popupBrowser.cancel();
+                     finish(request, false, { message: "No preset named exactly ‘" + exactName + "’ was found in Bitwig's preset browser. " + PRESET_LIMIT });
+                     return;
+                  }
+                  if (matches.length !== 1) {
+                     popupBrowser.cancel();
+                     finish(request, false, { message: "Preset loading refused because ‘" + exactName + "’ has " + matches.length + " exact matches.", matches: matches });
+                     return;
+                  }
+                  var resultIndex = matches[0].resultIndex;
+                  var pageOffset = Math.floor(resultIndex / BROWSER_PAGE) * BROWSER_PAGE;
+                  var indexInPage = resultIndex - pageOffset;
+                  resultBank.scrollPosition().set(pageOffset);
+                  later(110, function() {
+                     try {
+                        var item = resultBank.getItemAt(indexInPage);
+                        if (!item.exists().get() || normalizeText(item.name().get()) !== normalizeText(exactName)) {
+                           throw new Error("The preset browser results changed before loading. Nothing was loaded; try again.");
+                        }
+                        item.isSelected().set(true);
+                        later(80, function() {
+                           popupBrowser.commit();
+                           later(700, function() {
+                              try { confirmLoadedPreset(request, device, before); }
+                              catch (error) { finish(request, false, { message: String(error.message || error) }); }
+                           });
+                        });
+                     } catch (error) {
+                        try { popupBrowser.cancel(); } catch (ignore) { /* already closing */ }
+                        finish(request, false, { message: String(error.message || error) });
+                     }
+                  });
+               });
+            });
+         } catch (error) {
+            try { if (popupBrowser.exists().get()) popupBrowser.cancel(); } catch (ignore) { /* already closing */ }
+            finish(request, false, { message: String(error.message || error) });
+         }
       });
    });
 }
@@ -2492,6 +3406,24 @@ function dispatch(request) {
          return;
       case "list_clips":
          handleListClips(request);
+         return;
+      case "list_arranger_clips":
+         handleListArrangerClips(request);
+         return;
+      case "rename_clip":
+         handleRenameClip(request);
+         return;
+      case "write_automation":
+         handleWriteAutomation(request);
+         return;
+      case "find_presets":
+         handleFindPresets(request);
+         return;
+      case "place_audio_file":
+         handlePlaceAudioFile(request);
+         return;
+      case "load_preset":
+         handleLoadPreset(request);
          return;
       case "launch_scene":
          handleLaunchScene(request);
@@ -2882,6 +3814,7 @@ function init() {
    deviceBank = cursorTrack.createDeviceBank(MAX_DEVICES);
    launcherClip = host.createLauncherCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
    launcherClip.addNoteStepObserver(onLauncherNoteStep);
+   arrangerClip = host.createArrangerCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
 
    interested(application.projectName());
    interested(arranger.areCueMarkersVisible());
@@ -2930,12 +3863,20 @@ function init() {
    interested(launcherClip.getPlayStart());
    interested(launcherClip.getPlayStop());
    interested(launcherClip.isLoopEnabled());
+   interested(arrangerClip.exists());
+   interested(arrangerClip.getPlayStart());
+   interested(arrangerClip.getPlayStop());
+   interested(arrangerClip.getLoopStart());
+   interested(arrangerClip.getLoopLength());
+   interested(arrangerClip.isLoopEnabled());
 
    interested(transport.isPlaying());
    interested(transport.isArrangerRecordEnabled());
    interested(transport.isArrangerLoopEnabled());
    interested(transport.isArrangerOverdubEnabled());
    interested(transport.isClipLauncherOverdubEnabled());
+   interested(transport.automationWriteMode());
+   interested(transport.isArrangerAutomationWriteEnabled());
    interested(transport.tempo().value());
    interested(transport.tempo().value().displayedValue());
    interested(transport.getPosition());
@@ -2992,6 +3933,7 @@ function init() {
    creatorBank = popupBrowser.creatorColumn().createItemBank(128);
 
    interested(popupBrowser.exists());
+   interested(popupBrowser.shouldAudition());
    interested(popupBrowser.contentTypeNames());
    interested(popupBrowser.selectedContentTypeIndex());
    interested(resultColumn.exists());

@@ -48,6 +48,20 @@ function setup({ sceneCount = 20, clips = {}, clamp = false, stuck = false } = {
 
 const TRACK = { trackIndex: 0, trackName: "Keys" };
 
+test("rename updates a launcher clip and reads the slot name back", () => {
+  const { context, responses, advance, state, clips } = setup({ clips: { 0: "Old take" } });
+  context.launcherClip = {
+    exists: () => value(() => true),
+    setName: name => { clips[state.selected.at(-1)] = name; }
+  };
+  context.enqueue(5000, "1", "rename_clip", { ...TRACK, where: "launcher", slotIndex: 0, newName: "Verse" }, 30000);
+  advance(2000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.equal(responses[0].payload.verified, true);
+  assert.equal(clips[0], "Verse");
+  assert.equal(responses[0].payload.clip.name, "Verse");
+});
+
 test("bitwig_clips lists clips in every scene and scrolls the window back", () => {
   const { context, responses, advance, state } = setup({ sceneCount: 20, clips: { 2: "A", 9: "B", 17: "C" } });
   context.enqueue(5000, "1", "list_clips", TRACK, 60000);

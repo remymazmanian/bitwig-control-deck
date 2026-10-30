@@ -57,13 +57,14 @@ test("a request that stalls inside Bitwig times out and the next one runs", () =
   context.dispatch = request => {
     if (request.method === "good") context.finish(request, true, {});
   };
-  context.enqueue(5000, "1", "hang", {}, 500);
+  context.enqueue(5000, "1", "hang", {}, 1500);
   context.enqueue(5000, "2", "good", {}, 5000);
   advance(1400);
   assert.equal(responses.length, 0, "still within the stalled request's limit");
   advance(200);
   assert.deepEqual(responses.map(r => [r.id, r.ok]), [["1", false], ["2", true]]);
-  assert.match(responses[0].payload.message, /did not finish hang within 1500 ms/);
+  assert.match(responses[0].payload.message, /Timed out: hang did not finish within 1500 ms/);
+  assert.equal(responses[0].payload.timedOut, true);
 });
 
 test("late steps of a timed-out request don't answer twice or release the next request", () => {
@@ -72,7 +73,7 @@ test("late steps of a timed-out request don't answer twice or release the next r
     if (request.method === "slow") context.later(2000, () => context.finish(request, true, { late: true }));
     if (request.method === "second") context.later(1000, () => context.finish(request, true, {}));
   };
-  context.enqueue(5000, "1", "slow", {}, 500);
+  context.enqueue(5000, "1", "slow", {}, 1500);
   context.enqueue(5000, "2", "second", {}, 5000);
   advance(2100);
   assert.deepEqual(responses.map(r => [r.id, r.ok]), [["1", false]]);
@@ -85,7 +86,7 @@ test("requests the client already gave up on are skipped", () => {
   const { context, responses, advance } = loadController();
   const dispatched = [];
   context.dispatch = request => dispatched.push(request.method);
-  context.enqueue(5000, "1", "hang", {}, 500);
+  context.enqueue(5000, "1", "hang", {}, 1500);
   context.enqueue(5000, "2", "abandoned", {}, 1000);
   advance(1600);
   assert.deepEqual(dispatched, ["hang"]);

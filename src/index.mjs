@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { BitwigClient } from "./bitwig-client.mjs";
+import { readAudioFileTiming } from "./audio-file.mjs";
 import { buildPluginIndex, readPluginIndex, searchPluginIndex } from "./plugin-index.mjs";
 
 const client = new BitwigClient();
@@ -81,13 +82,16 @@ server.registerTool("bitwig_transport", {
 }, async args => call("transport", args));
 
 server.registerTool("bitwig_cue_markers", {
-  description: "List Arranger cue markers, or create/update a named marker set at exact beat positions with Bitwig readback verification.",
+  description: "List Arranger cue markers, create or update a named marker set at exact beat positions, or rename or delete one marker by its index and current name. Writes are read back from Bitwig.",
   inputSchema: {
-    action: z.enum(["list", "upsert"]).default("list"),
+    action: z.enum(["list", "upsert", "rename", "delete"]).default("list"),
     markers: z.array(z.object({
       name: z.string().min(1).max(120),
       positionBeats: z.number().nonnegative()
-    })).min(1).max(64).optional()
+    })).min(1).max(64).optional(),
+    index: z.number().int().nonnegative().optional().describe("Cue marker index returned by action list; required for rename and delete"),
+    name: z.string().min(1).max(120).optional().describe("Exact current cue marker name; required for rename and delete"),
+    newName: z.string().min(1).max(120).optional().describe("Name to set when action is rename")
   }
 }, async args => call("cue_markers", args, 30000));
 
@@ -190,6 +194,24 @@ server.registerTool("bitwig_nest_device", {
   }
 }, async args => call("nest_device", args, 15000));
 
+server.registerTool("bitwig_find_presets", {
+  description: "Search Bitwig's preset browser for one exact device. Returns presets Bitwig has indexed for that device. A plug-in's own preset browser is not searched, and audition is turned off so browsing does not load a preset.",
+  inputSchema: {
+    ...deviceSelector,
+    query: z.string().default(""),
+    limit: z.number().int().min(1).max(100).default(50)
+  }
+}, async args => call("find_presets", args, 20000));
+
+server.registerTool("bitwig_load_preset", {
+  description: "Load one preset onto an exact device, by the exact name in Bitwig's preset browser or by an absolute .bwpreset or .vstpreset path. The device name must stay the same and the preset name must change. Plug-in-internal browsers cannot be driven; if Bitwig does not confirm the preset, nothing is left in place when undo can reverse it.",
+  inputSchema: {
+    ...deviceSelector,
+    exactName: z.string().min(1).optional(),
+    path: z.string().min(1).optional()
+  }
+}, async args => call("load_preset", args, 20000));
+
 server.registerTool("bitwig_save_device_preset", {
   description: "Open Bitwig’s native Save to Library dialog for one verified device. Bitwig's API can't type the name, so the dialog stays open for you unless confirm is true, which presses Enter to accept the prefilled name.",
   inputSchema: {
@@ -231,6 +253,24 @@ server.registerTool("bitwig_arrange_launcher_clips", {
     restoreTempo: z.number().min(20).max(666).optional().describe("Tempo to set after recording; defaults to the project's tempo before recording")
   }
 }, async args => call("arrange_launcher_clips", args, 120000));
+
+server.registerTool("bitwig_rename_clip", {
+  description: "Rename one launcher clip, or the Arranger clip on a track that starts at a beat. Launcher renames are read back from the slot. Arranger renames use Clip.setName; Controller API 18 has no name getter, so those are sent and reported unverified. An Arranger clip can be renamed only when the arranger cursor can land on it.",
+  inputSchema: {
+    where: z.enum(["launcher", "arranger"]),
+    ...trackSelector,
+    slotIndex: z.number().int().min(0).max(1023).optional().describe("Launcher slot index; required when where is launcher"),
+    startBeats: z.number().nonnegative().optional().describe("Arranger clip start in beats; required when where is arranger"),
+    newName: z.string().min(1).max(120)
+  }
+}, async args => call("rename_clip", args, 30000));
+
+server.registerTool("bitwig_arranger_clips", {
+  description: "List Arranger clips the Controller API 18 cursor can see: track, start and end beat, and whether the track holds audio or notes. Clip names and stretch mode are not readable. If the host cursor cannot move, only the selected Arranger clip is returned.",
+  inputSchema: {
+    limit: z.number().int().min(1).max(128).default(128)
+  }
+}, async args => call("list_arranger_clips", args, 60000));
 
 server.registerTool("bitwig_clips", {
   description: "List populated launcher clips in every scene for one exact track.",
@@ -309,6 +349,35 @@ server.registerTool("bitwig_insert_sample", {
   }
 }, async args => call("insert_sample", args, 25000));
 
+server.registerTool("bitwig_place_audio_file", {
+  description: "Ask to place a WAV, AIFF, or FLAC file on an audio track at an Arranger beat in Raw (no stretch) mode. Controller API 18 cannot do this without using drag-and-drop import, which can tempo-detect and stretch the file, and it cannot set Raw afterwards. The tool places nothing and reports how long Raw playback would be at the current tempo.",
+  inputSchema: {
+    path: z.string().min(1),
+    startBeats: z.number().nonnegative(),
+    stretchMode: z.enum(["raw"]).default("raw").describe("Only raw is accepted. It still cannot be applied, so the file is not placed"),
+    trackIndex: z.number().int().nonnegative().optional(),
+    trackName: z.string().min(1).optional(),
+    createTrackName: z.string().min(1).max(120).optional().describe("Ignored. No track is created, because the file cannot be placed safely")
+  }
+}, async args => {
+  let timing;
+  try {
+    timing = readAudioFileTiming(args.path);
+  } catch (error) {
+    return { content: [{ type: "text", text: error.message }], isError: true };
+  }
+  return call("place_audio_file", {
+    path: args.path,
+    startBeats: args.startBeats,
+    stretchMode: args.stretchMode,
+    durationSeconds: timing.durationSeconds,
+    sampleRate: timing.sampleRate,
+    bitDepth: timing.bitDepth,
+    channels: timing.channels,
+    format: timing.format
+  }, 10000);
+});
+
 server.registerTool("bitwig_insert_sample_file", {
   description: "Load an absolute WAV, AIFF, or FLAC file path into a new Bitwig Sampler device on an exact instrument track and verify the loaded sample name.",
   inputSchema: {
@@ -363,6 +432,27 @@ server.registerTool("bitwig_set_remote_control", {
     value: z.number().min(0).max(1)
   }
 }, async args => call("set_remote_control", args, 10000));
+
+server.registerTool("bitwig_write_automation", {
+  description: "Record a ramp on track volume, track pan, a device Remote Control, or a direct device parameter between two beats. The ramp is played in latch automation-write mode, then checked against the value at the playhead. Controller API 18 cannot insert automation breakpoints. Direct plug-in parameters often do not record; use a Remote Control when the ramp is not confirmed. Linear is the default; shape curve with curve above 1 stays nearer the start value for longer, and below 1 rises sooner.",
+  inputSchema: {
+    target: z.enum(["volume", "pan", "remote", "parameter"]),
+    ...trackSelector,
+    deviceIndex: z.number().int().nonnegative().optional(),
+    deviceName: z.string().min(1).optional(),
+    pageName: z.string().min(1).optional(),
+    pageIndex: z.number().int().nonnegative().optional(),
+    controlName: z.string().min(1).optional(),
+    controlIndex: z.number().int().min(0).max(7).optional(),
+    parameterId: z.string().min(1).optional().describe("Stable ID from bitwig_device_parameters; prefer a Remote Control when this does not confirm"),
+    startBeats: z.number().nonnegative(),
+    endBeats: z.number().positive(),
+    from: z.number().min(0).max(1),
+    to: z.number().min(0).max(1),
+    shape: z.enum(["linear", "curve"]).default("linear"),
+    curve: z.number().min(0.25).max(4).default(1).describe("Exponent used when shape is curve. 1 matches linear")
+  }
+}, async args => call("write_automation", args, 60000));
 
 server.registerTool("bitwig_set_device_parameter", {
   description: "Set one device parameter by its stable ID and verify the normalized value through Bitwig readback.",

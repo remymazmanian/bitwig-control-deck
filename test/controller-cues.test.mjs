@@ -10,9 +10,15 @@ function setup({ playhead = 16, playing = false, markers = [], addWorks = true }
   context.dispatch = loaded.originalDispatch;
   const state = { playhead, playing, markers: markers.map(m => ({ ...m })), moves: [] };
   const view = marker => ({
-    exists: () => value(() => true),
+    exists: () => value(() => state.markers.includes(marker)),
     name: () => value(() => marker.name, next => { marker.name = next; }),
-    position: () => ({ ...value(() => marker.positionBeats), setRaw: next => { marker.positionBeats = next; } })
+    position: () => ({ ...value(() => marker.positionBeats), setRaw: next => { marker.positionBeats = next; } }),
+    deleteObject: () => {
+      context.host.scheduleTask(() => {
+        const at = state.markers.indexOf(marker);
+        if (at >= 0) state.markers.splice(at, 1);
+      }, 30);
+    }
   });
   context.transport = {
     getPosition: () => value(() => state.playhead),
@@ -97,6 +103,34 @@ test("a failed add after moving the playhead aside still puts it back", () => {
   assert.equal(state.moves.at(-1), 16);
   advance(100);
   assert.equal(state.playhead, 16);
+});
+
+test("rename changes one cue marker and reads the new name back", () => {
+  const { context, responses, advance, state } = setup({ markers: [{ name: "Intro", positionBeats: 0 }, { name: "Drop", positionBeats: 32 }] });
+  context.enqueue(5000, "1", "cue_markers", { action: "rename", index: 1, name: "Drop", newName: "Chorus" }, 30000);
+  advance(1000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.equal(state.markers[1].name, "Chorus");
+  assert.equal(responses[0].payload.marker.name, "Chorus");
+  assert.equal(state.markers[0].name, "Intro");
+});
+
+test("rename refuses a cue marker whose name does not match", () => {
+  const { context, responses, advance, state } = setup({ markers: [{ name: "Intro", positionBeats: 0 }] });
+  context.enqueue(5000, "1", "cue_markers", { action: "rename", index: 0, name: "Verse", newName: "Chorus" }, 30000);
+  advance(200);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /now named/);
+  assert.equal(state.markers[0].name, "Intro");
+});
+
+test("delete removes one cue marker and leaves the others", () => {
+  const { context, responses, advance, state } = setup({ markers: [{ name: "Intro", positionBeats: 0 }, { name: "Drop", positionBeats: 32 }] });
+  context.enqueue(5000, "1", "cue_markers", { action: "delete", index: 0, name: "Intro" }, 30000);
+  advance(1000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.deepEqual(state.markers, [{ name: "Drop", positionBeats: 32 }]);
+  assert.equal(responses[0].payload.deleted.name, "Intro");
 });
 
 test("a failed add without a move does not touch the playhead", () => {

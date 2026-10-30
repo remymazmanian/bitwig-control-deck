@@ -175,7 +175,7 @@ Merge it into the file each one reads, then restart it or refresh its MCP list:
 
 ## MCP tool reference
 
-All 35 tools follow the same contract: **exact targets** (mutations require both index and current name; stale names are refused), **no preset loading** (only Bitwig's Devices browser is used), and **readback verification** (writes report the value Bitwig actually shows afterward).
+All 41 tools follow the same contract: **exact targets** (mutations require both index and current name; stale names are refused), **device insertion does not load presets** (only Bitwig's Devices browser is used there), and **readback verification** (writes report the value Bitwig actually shows afterward). Preset tools are separate and only see presets Bitwig has indexed. Where Controller API 18 cannot do something, the tool says so and does not invent a result.
 
 ### Status & session
 
@@ -195,12 +195,36 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 
 ### Clips & arrangement
 
+- **bitwig_arranger_clips** — List Arranger clips the cursor can see, with track, start beat, end beat, and whether the track holds audio or notes. Clip names and stretch mode are not readable in Controller API 18. If this Bitwig build's arranger cursor cannot move to the next clip, only the selected Arranger clip is returned and `complete` is false.
+
+```json
+{ "limit": 128 }
+```
+
+- **bitwig_rename_clip** — Rename a launcher clip (the slot name is read back) or the Arranger clip on a track that starts at a beat. An Arranger rename is sent with `Clip.setName`. API 18 has no name getter, so `verified` is false for Arranger clips, and the cursor has to be able to land on that clip.
+
+```json
+{ "where": "launcher", "trackIndex": 2, "trackName": "Vocals", "slotIndex": 0, "newName": "Verse" }
+```
+
+```json
+{ "where": "arranger", "trackIndex": 2, "trackName": "Vocals", "startBeats": 32, "newName": "Chorus" }
+```
+
 - **bitwig_clips** — List populated launcher clips in every scene for one exact track, with the project's scene count. Clip and scene tools take slot and scene numbers from 0 to 1023, and creating a clip one slot past the last scene adds a new scene for it.
 - **bitwig_clip_notes** — Read every note in one launcher clip (beat, pitch, velocity, duration, channel, muted). Notes are read from Bitwig's step grid, so a note that starts between steps comes back at the step it starts in; the reply says `quantized: true`.
 - **bitwig_create_note_clip** — Create or replace a launcher MIDI clip on one exact instrument track and write its complete note content. Every note is then read back from the clip; a missing, changed, muted, or extra note fails the call and names the first five differences.
-- **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions. Recording starts at the earliest region and runs at 666 BPM, and one print covers at most 1024 beats. While it records, armed tracks are disarmed and Arranger and Launcher overdub are off, so nothing else gets recorded. Afterwards, and also when the print fails or times out, Bitwig gets back its tempo, loop, overdub, track arms and playhead position.
+- **bitwig_arrange_launcher_clips** — Record existing launcher clips into the Arranger across exact beat regions, merging contiguous regions. Recording starts at the earliest region and runs at 666 BPM, and one print covers at most 1024 beats. While it records, armed tracks are disarmed and Arranger and Launcher overdub are off, so nothing else gets recorded. Afterwards, and also when the print fails or times out, Bitwig gets back its tempo, loop, overdub, and playhead position. Record-arm is put back on the tracks that had it, matched by name, so a scroll of the track bank cannot arm a different track. A print that runs past its time limit stops the transport and restores that same state.
 - **bitwig_launch_scene** — Launch one scene immediately and from the start across all tracks.
-- **bitwig_cue_markers** — List Arranger cue markers, or create/update a named marker set at exact beat positions with readback verification. New markers are added at the playhead and moved into place, so playback does not jump. If the transport is stopped on an existing marker, the playhead is moved aside for a moment and put back.
+- **bitwig_cue_markers** — List Arranger cue markers, create or update a named marker set at exact beat positions, or rename or delete one marker by its index and current name. Writes are read back. New markers are added at the playhead and moved into place, so playback does not jump. If the transport is stopped on an existing marker, the playhead is moved aside for a moment and put back.
+
+```json
+{ "action": "rename", "index": 1, "name": "Drop", "newName": "Chorus" }
+```
+
+```json
+{ "action": "delete", "index": 0, "name": "Intro" }
+```
 
 ### Devices
 
@@ -210,6 +234,22 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 - **bitwig_insert_stock_device** — Insert a stock Bitwig device by its stable UUID, optionally before a verified device — including note-processing positions the end-of-chain Browser omits.
 - **bitwig_insert_clap_device** — Insert a CLAP plug-in directly by its stable ID, bypassing Browser filters and redundant-format hiding.
 - **bitwig_nest_device** — Move one verified top-level device into another device's native nested chain and verify both chains.
+- **bitwig_find_presets** — Search the preset tab of Bitwig's browser for one exact device. Audition is turned off. These are presets Bitwig has indexed, not the contents of a plug-in's own browser.
+
+```json
+{ "trackIndex": 0, "trackName": "Keys", "deviceIndex": 0, "deviceName": "Pigments", "query": "pad", "limit": 50 }
+```
+
+- **bitwig_load_preset** — Load one indexed preset by exact name, or insert an absolute `.bwpreset` or `.vstpreset` file onto the device. The device name must stay the same and the preset name must change, or the load is undone when Bitwig's undo can reverse it.
+
+```json
+{ "trackIndex": 0, "trackName": "Keys", "deviceIndex": 0, "deviceName": "Pigments", "exactName": "Pad Warm" }
+```
+
+```json
+{ "trackIndex": 0, "trackName": "Keys", "deviceIndex": 0, "deviceName": "Pigments", "path": "/Users/me/Presets/Pad.bwpreset" }
+```
+
 - **bitwig_save_device_preset** — Open Bitwig's native Save-to-Library flow for one verified device, without mouse automation.
 - **bitwig_delete_device** — Delete one exact device; both track and device names must still match. It succeeds only after Bitwig's device list shows the device gone and every other device in its place.
 - **bitwig_open_device_window** — Open the native window for one exact device or plug-in.
@@ -218,12 +258,26 @@ All 35 tools follow the same contract: **exact targets** (mutations require both
 
 - **bitwig_find_samples** — Search Bitwig's indexed Samples browser for one exact instrument track.
 - **bitwig_insert_sample** — Load one exact indexed sample into a new Sampler at the end of an instrument track.
-- **bitwig_insert_sample_file** — Load an absolute WAV/AIFF/FLAC path into a new Sampler and verify the loaded sample name.
+- **bitwig_insert_sample_file** — Load an absolute WAV/AIFF/FLAC path into a new Sampler and verify the loaded sample name. This does not place the file on an audio track.
+- **bitwig_place_audio_file** — Report how long a WAV, AIFF, or FLAC file would be in Raw mode at the current tempo. Controller API 18 cannot place that file on an Arranger beat and then set Raw / no stretch. Drag-and-drop import can tempo-detect a 48 kHz stem and stretch it, so this tool inserts nothing and creates no track.
+
+```json
+{ "path": "/Users/me/stems/vocal.wav", "startBeats": 16, "stretchMode": "raw" }
+```
 
 ### Parameters
 
 - **bitwig_device_parameters** — Read a device's full direct parameter list — third-party plug-ins included — with stable IDs and current values.
 - **bitwig_set_device_parameter** — Set one parameter by stable ID and verify the normalized value through readback.
+- **bitwig_write_automation** — Record a linear or curved ramp between two beats on track volume, track pan, a Remote Control, or a direct device parameter. The ramp is played in latch mode and checked against the value at the playhead. API 18 cannot insert automation breakpoints. A direct plug-in parameter that does not follow the playhead is reported as not confirmed; map it to a Remote Control and use `target: "remote"` instead.
+
+```json
+{ "target": "volume", "trackIndex": 2, "trackName": "Vocals", "startBeats": 16, "endBeats": 32, "from": 0, "to": 0.7, "shape": "linear" }
+```
+
+```json
+{ "target": "remote", "trackIndex": 0, "trackName": "Keys", "deviceIndex": 0, "deviceName": "Pigments", "pageName": "Filter", "controlName": "Cutoff", "startBeats": 48, "endBeats": 64, "from": 0.2, "to": 0.85, "shape": "curve", "curve": 2 }
+```
 - **bitwig_remote_controls** — Show the compact eight-knob Remote Controls section for one exact device; optionally select a named page.
 - **bitwig_selected_device_remote_controls** — Show or hide Remote Controls for the currently selected device, including nested devices.
 - **bitwig_set_remote_control** — Set one visible Remote Control by page and control name via the same native path as the on-screen knobs, then verify.
@@ -278,7 +332,11 @@ Ports (all loopback-only): `50701/udp` bridge, `50702/tcp` status API, `50703/tc
 
 **"Bitwig could not send the … reply."** macOS refused the message from Bitwig, usually because it was larger than the system allows for one message. Ask for less at once, as above. The Controller Script Console shows the same error with the size.
 
-**An agent connects but tools time out.** Bitwig must be open with the controller enabled; requests need a live bridge. `bitwig_status` is the cheapest way to check what the agent sees.
+**An agent connects but tools time out.** Bitwig must be open with the controller enabled; requests need a live bridge. `bitwig_status` is the cheapest way to check what the agent sees. A long print or automation pass that does not finish says `Timed out:` and stops the transport, puts record-arm back, and closes a browser that pass opened. If every call times out with no `Timed out:` from the bridge, the controller is not enabled or the auth token does not match.
+
+**A stem came in at the wrong length.** `bitwig_place_audio_file` will not import audio onto a track. Controller API 18 has no Raw / stretch control, and the import path Bitwig does offer is the same as a drag, which can detect tempo and stretch a 48 kHz file. The reply's `rawLengthBeats` is the length Raw playback would have at the current tempo. Set the clip to Raw yourself in Bitwig if you drag it in.
+
+**Arranger clip names did not come back.** `bitwig_arranger_clips` can walk the arranger cursor when the host allows it, and otherwise only the selected clip. API 18's Clip object can be renamed with `bitwig_rename_clip` but cannot be asked for its name or its stretch mode.
 
 ## Uninstalling
 
