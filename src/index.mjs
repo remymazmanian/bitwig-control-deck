@@ -235,6 +235,17 @@ server.registerTool("bitwig_arrange_launcher_clips", {
   }
 }, async args => call("arrange_launcher_clips", args, 120000));
 
+server.registerTool("bitwig_rename_clip", {
+  description: "Rename one launcher clip, or the Arranger clip on a track that starts at a beat. Launcher renames are read back from the slot. Arranger renames use Clip.setName; Controller API 18 has no name getter, so those are sent and reported unverified. An Arranger clip can be renamed only when the arranger cursor can land on it.",
+  inputSchema: {
+    where: z.enum(["launcher", "arranger"]),
+    ...trackSelector,
+    slotIndex: z.number().int().min(0).max(1023).optional().describe("Launcher slot index; required when where is launcher"),
+    startBeats: z.number().nonnegative().optional().describe("Arranger clip start in beats; required when where is arranger"),
+    newName: z.string().min(1).max(120)
+  }
+}, async args => call("rename_clip", args, 30000));
+
 server.registerTool("bitwig_arranger_clips", {
   description: "List Arranger clips the Controller API 18 cursor can see: track, start and end beat, and whether the track holds audio or notes. Clip names and stretch mode are not readable. If the host cursor cannot move, only the selected Arranger clip is returned.",
   inputSchema: {

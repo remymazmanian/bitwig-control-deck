@@ -2683,6 +2683,106 @@ function handleListArrangerClips(request) {
    });
 }
 
+function handleRenameClip(request) {
+   var params = request.params;
+   var newName = String(params.newName || "").trim();
+   if (!newName || newName.length > 120) throw new Error("Clip names must be between 1 and 120 characters.");
+   var where = String(params.where || "");
+   if (where === "launcher") {
+      var slotIndex = requireSlotIndex(params.slotIndex, "Clip");
+      selectTrack(request, params, function(track) {
+         withSceneSlot(request, track, slotIndex, function(slot) {
+            if (!slot.hasContent().get()) throw new Error("Clip slot " + slotIndex + " has no clip to rename.");
+            slot.select();
+            later(160, function() {
+               try {
+                  if (!launcherClip.exists().get()) throw new Error("Bitwig did not expose the launcher clip in slot " + slotIndex + ".");
+                  launcherClip.setName(newName);
+                  later(180, function() {
+                     var actual = slot.name().get();
+                     if (actual !== newName) {
+                        finish(request, false, { message: "Bitwig did not rename the launcher clip. It is still ‘" + actual + "’." });
+                        return;
+                     }
+                     finish(request, true, {
+                        where: "launcher",
+                        renamed: true,
+                        verified: true,
+                        clip: clipSnapshot(slot, slotIndex)
+                     });
+                  });
+               } catch (error) {
+                  finish(request, false, { message: String(error.message || error) });
+               }
+            });
+         });
+      });
+      return;
+   }
+   if (where !== "arranger") throw new Error("Clip location must be launcher or arranger.");
+   if (!arrangerClip) throw new Error("The Arranger clip cursor is not available.");
+   var startBeats = Number(params.startBeats);
+   if (!(startBeats >= 0)) throw new Error("Arranger clip start must be zero or greater.");
+   function matches(clip) {
+      return !!(clip && clip.trackName === String(params.trackName) && Math.abs(clip.playStartBeats - startBeats) < 0.001);
+   }
+   function apply() {
+      arrangerClip.setName(newName);
+      later(180, function() {
+         var readable = typeof arrangerClip.name === "function";
+         var actual = readable ? String(arrangerClip.name().get()) : null;
+         var verified = readable && actual === newName;
+         finish(request, true, {
+            where: "arranger",
+            renamed: true,
+            verified: verified,
+            name: verified ? actual : null,
+            nameReadable: readable,
+            trackName: String(params.trackName),
+            startBeats: startBeats,
+            limit: verified ? undefined : "Controller API 18's Clip has setName but no name getter, so the Arranger rename was sent and could not be read back."
+         });
+      });
+   }
+   function miss(clip) {
+      var selected = clip ? clip.trackName + " at beat " + clip.playStartBeats : "no clip";
+      finish(request, false, {
+         message: "No Arranger clip on ‘" + params.trackName + "’ starts at beat " + startBeats +
+            ". Controller API 18 can rename only the clip the arranger cursor is on" +
+            (arrangerClipNavigable() ? ", and walking that cursor did not find it." : ", and this host cannot move that cursor. Select the clip in Bitwig and try again.") +
+            " The cursor is on " + selected + ".",
+         verified: false
+      });
+   }
+   if (!arrangerClipNavigable()) {
+      readArrangerSelection(function(clip) {
+         if (!matches(clip)) miss(clip);
+         else apply();
+      });
+      return;
+   }
+   var steps = 0;
+   arrangerClip.selectFirst();
+   function walk() {
+      if (request.done) return;
+      readArrangerSelection(function(clip) {
+         if (request.done) return;
+         if (matches(clip)) {
+            apply();
+            return;
+         }
+         var hasNext = !!(clip && arrangerClip.hasNext && arrangerClip.hasNext().get());
+         if (!hasNext || steps++ > 128) {
+            miss(clip);
+            return;
+         }
+         arrangerClip.selectNext();
+         later(40, walk);
+      });
+   }
+   later(40, walk);
+}
+
 function dispatch(request) {
    var params = request.params;
    switch (request.method) {
@@ -2791,6 +2891,9 @@ function dispatch(request) {
          return;
       case "list_arranger_clips":
          handleListArrangerClips(request);
+         return;
+      case "rename_clip":
+         handleRenameClip(request);
          return;
       case "launch_scene":
          handleLaunchScene(request);

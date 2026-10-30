@@ -85,6 +85,26 @@ test("a cursor that cannot move reports only the selected arranger clip", () => 
   assert.match(responses[0].payload.limit, /cannot move to the next clip/);
 });
 
+test("rename sends a new name for the matching arranger clip and does not claim it was read back", () => {
+  const { context, responses, advance } = setup({ clips, selected: 0 });
+  let renamed = null;
+  context.arrangerClip.setName = name => { renamed = name; };
+  context.enqueue(5000, "1", "rename_clip", { where: "arranger", trackIndex: 0, trackName: "Vocals", startBeats: 32, newName: "Chorus" }, 30000);
+  advance(20000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.equal(renamed, "Chorus");
+  assert.equal(responses[0].payload.verified, false);
+  assert.equal(responses[0].payload.nameReadable, false);
+});
+
+test("rename refuses an arranger clip the cursor cannot find", () => {
+  const { context, responses, advance } = setup({ clips, navigate: false, selected: 1 });
+  context.enqueue(5000, "1", "rename_clip", { where: "arranger", trackIndex: 0, trackName: "Vocals", startBeats: 0, newName: "Chorus" }, 30000);
+  advance(1000);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].payload.message, /cannot move that cursor/);
+});
+
 test("an empty arranger selection lists nothing", () => {
   const { context, responses, advance } = setup({ clips: [], navigate: false, selected: 0 });
   context.enqueue(5000, "1", "list_arranger_clips", {}, 60000);
