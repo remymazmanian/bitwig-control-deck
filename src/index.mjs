@@ -193,6 +193,24 @@ server.registerTool("bitwig_nest_device", {
   }
 }, async args => call("nest_device", args, 15000));
 
+server.registerTool("bitwig_find_presets", {
+  description: "Search Bitwig's preset browser for one exact device. Returns presets Bitwig has indexed for that device. A plug-in's own preset browser is not searched, and audition is turned off so browsing does not load a preset.",
+  inputSchema: {
+    ...deviceSelector,
+    query: z.string().default(""),
+    limit: z.number().int().min(1).max(100).default(50)
+  }
+}, async args => call("find_presets", args, 20000));
+
+server.registerTool("bitwig_load_preset", {
+  description: "Load one preset onto an exact device, by the exact name in Bitwig's preset browser or by an absolute .bwpreset or .vstpreset path. The device name must stay the same and the preset name must change. Plug-in-internal browsers cannot be driven; if Bitwig does not confirm the preset, nothing is left in place when undo can reverse it.",
+  inputSchema: {
+    ...deviceSelector,
+    exactName: z.string().min(1).optional(),
+    path: z.string().min(1).optional()
+  }
+}, async args => call("load_preset", args, 20000));
+
 server.registerTool("bitwig_save_device_preset", {
   description: "Open Bitwig’s native Save to Library dialog for one verified device. Bitwig's API can't type the name, so the dialog stays open for you unless confirm is true, which presses Enter to accept the prefilled name.",
   inputSchema: {
@@ -384,6 +402,27 @@ server.registerTool("bitwig_set_remote_control", {
     value: z.number().min(0).max(1)
   }
 }, async args => call("set_remote_control", args, 10000));
+
+server.registerTool("bitwig_write_automation", {
+  description: "Record a ramp on track volume, track pan, a device Remote Control, or a direct device parameter between two beats. The ramp is played in latch automation-write mode, then checked against the value at the playhead. Controller API 18 cannot insert automation breakpoints. Direct plug-in parameters often do not record; use a Remote Control when the ramp is not confirmed. Linear is the default; shape curve with curve above 1 stays nearer the start value for longer, and below 1 rises sooner.",
+  inputSchema: {
+    target: z.enum(["volume", "pan", "remote", "parameter"]),
+    ...trackSelector,
+    deviceIndex: z.number().int().nonnegative().optional(),
+    deviceName: z.string().min(1).optional(),
+    pageName: z.string().min(1).optional(),
+    pageIndex: z.number().int().nonnegative().optional(),
+    controlName: z.string().min(1).optional(),
+    controlIndex: z.number().int().min(0).max(7).optional(),
+    parameterId: z.string().min(1).optional().describe("Stable ID from bitwig_device_parameters; prefer a Remote Control when this does not confirm"),
+    startBeats: z.number().nonnegative(),
+    endBeats: z.number().positive(),
+    from: z.number().min(0).max(1),
+    to: z.number().min(0).max(1),
+    shape: z.enum(["linear", "curve"]).default("linear"),
+    curve: z.number().min(0.25).max(4).default(1).describe("Exponent used when shape is curve. 1 matches linear")
+  }
+}, async args => call("write_automation", args, 60000));
 
 server.registerTool("bitwig_set_device_parameter", {
   description: "Set one device parameter by its stable ID and verify the normalized value through Bitwig readback.",

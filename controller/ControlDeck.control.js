@@ -358,6 +358,18 @@ function restoreArmState(saved) {
    return missing;
 }
 
+// curve 1 is a straight ramp. Above 1 the value stays nearer `from` for longer.
+// Below 1 it rises sooner and settles nearer `to`.
+function automationRampValue(from, to, t, curve) {
+   var progress = Number(t);
+   if (!(progress > 0)) progress = 0;
+   if (progress > 1) progress = 1;
+   var power = Number(curve);
+   if (!(power > 0)) power = 1;
+   if (Math.abs(power - 1) > 0.0001) progress = Math.pow(progress, power);
+   return from + (to - from) * progress;
+}
+
 function armedTrackCount(saved) {
    var count = 0;
    for (var i = 0; i < saved.arms.length; i++) if (saved.arms[i].armed) count++;
@@ -2683,6 +2695,296 @@ function handleListArrangerClips(request) {
    });
 }
 
+var MAX_AUTOMATION_BEATS = 256;
+
+function parameterTarget(parameter, label) {
+   return {
+      label: label,
+      direct: false,
+      read: function() { return Number(parameter.get()); },
+      write: function(value) { parameter.set(value); },
+      touch: function(on) { parameter.touch(Boolean(on)); },
+      restore: function() { parameter.restoreAutomationControl(); }
+   };
+}
+
+function directParameterTarget(device, id) {
+   return {
+      label: directNames[id] || id,
+      direct: true,
+      read: function() { return Number(directValues[id]); },
+      write: function(value) {
+         var resolution = 128;
+         device.setDirectParameterValueNormalized(id, Math.round(Number(value) * (resolution - 1)), resolution);
+      },
+      touch: function() {},
+      restore: function() {}
+   };
+}
+
+function resolveAutomationTarget(request, callback) {
+   var params = request.params;
+   var target = String(params.target || "");
+   if (target === "volume" || target === "pan") {
+      var track = requireTrack(params);
+      callback(parameterTarget(target === "volume" ? track.volume() : track.pan(), target));
+      return;
+   }
+   if (target !== "remote" && target !== "parameter") throw new Error("Automation target must be volume, pan, remote, or parameter.");
+   selectDevice(request, params, function(device) {
+      try {
+         if (target === "parameter") {
+            var id = String(params.parameterId || "");
+            if (!directIds || directIds.indexOf(id) === -1) {
+               throw new Error("Parameter ID ‘" + id + "’ is not exposed by the selected device. Refresh its parameters.");
+            }
+            callback(directParameterTarget(device, id));
+            return;
+         }
+         var pageNames = arrayCopy(cursorRemoteControlsPage.pageNames().get());
+         var pageIndex = params.pageIndex === undefined ? pageNames.indexOf(String(params.pageName || "")) : Number(params.pageIndex);
+         if (!(pageIndex >= 0 && pageIndex < pageNames.length)) throw new Error("Remote Controls page was not found.");
+         cursorRemoteControlsPage.selectedPageIndex().set(pageIndex);
+         later(200, function() {
+            try {
+               var controlIndex = params.controlIndex === undefined ? -1 : Number(params.controlIndex);
+               if (controlIndex < 0 && params.controlName !== undefined) {
+                  var requestedName = String(params.controlName);
+                  for (var i = 0; i < 8; i++) {
+                     if (cursorRemoteControlsPage.getParameter(i).name().get() === requestedName) {
+                        controlIndex = i;
+                        break;
+                     }
+                  }
+               }
+               if (!(controlIndex >= 0 && controlIndex < 8)) throw new Error("Remote control was not found on page ‘" + pageNames[pageIndex] + "’.");
+               var control = cursorRemoteControlsPage.getParameter(controlIndex);
+               if (!control.exists().get()) throw new Error("The requested Remote Control slot is empty.");
+               callback(parameterTarget(control, control.name().get()));
+            } catch (error) {
+               finish(request, false, { message: String(error.message || error) });
+            }
+         });
+      } catch (error) {
+         finish(request, false, { message: String(error.message || error) });
+      }
+   });
+}
+
+function handleWriteAutomation(request) {
+   var params = request.params;
+   var from = Number(params.from);
+   var to = Number(params.to);
+   var startBeats = Number(params.startBeats);
+   var endBeats = Number(params.endBeats);
+   var shape = String(params.shape || "linear");
+   var curve = params.curve === undefined || params.curve === null ? 1 : Number(params.curve);
+   if (!(from >= 0 && from <= 1) || !(to >= 0 && to <= 1)) throw new Error("Automation values must be between 0 and 1.");
+   if (!(startBeats >= 0) || !(endBeats > startBeats)) throw new Error("Automation end beat must be greater than the start beat.");
+   var span = endBeats - startBeats;
+   if (span > MAX_AUTOMATION_BEATS) throw new Error("One automation pass can cover at most " + MAX_AUTOMATION_BEATS + " beats.");
+   if (shape !== "linear" && shape !== "curve") throw new Error("Automation shape must be linear or curve.");
+   if (shape === "linear") curve = 1;
+   if (!(curve >= 0.25 && curve <= 4)) throw new Error("Automation curve must be between 0.25 and 4.");
+
+   resolveAutomationTarget(request, function(target) {
+      var saved = {
+         loopEnabled: transport.isArrangerLoopEnabled().get(),
+         position: transport.getPosition().get(),
+         tempo: transport.tempo().value().getRaw(),
+         arrangerOverdub: transport.isArrangerOverdubEnabled().get(),
+         launcherOverdub: transport.isClipLauncherOverdubEnabled().get(),
+         record: transport.isArrangerRecordEnabled().get(),
+         writeEnabled: transport.isArrangerAutomationWriteEnabled().get(),
+         writeMode: String(transport.automationWriteMode().get()),
+         arms: captureArmState(),
+         value: target.read()
+      };
+      var writeSeconds = Math.min(16, Math.max(4, span * 0.2));
+      var tempo = span * 60 / writeSeconds;
+      if (tempo < 20) tempo = 20;
+      if (tempo > 666) tempo = 666;
+      var completed = false;
+      var settled = false;
+      var restored = false;
+
+      function restoreState() {
+         if (restored) {
+            restoreArmState(saved.arms);
+            return;
+         }
+         restored = true;
+         try { target.touch(false); } catch (error) { host.errorln("Control Deck could not release the automated parameter: " + error); }
+         try { target.restore(); } catch (error) { host.errorln("Control Deck could not return the parameter to its automation: " + error); }
+         transport.stop();
+         transport.isArrangerRecordEnabled().set(saved.record);
+         transport.isArrangerAutomationWriteEnabled().set(saved.writeEnabled);
+         transport.automationWriteMode().set(saved.writeMode);
+         transport.isArrangerLoopEnabled().set(saved.loopEnabled);
+         transport.isArrangerOverdubEnabled().set(saved.arrangerOverdub);
+         transport.isClipLauncherOverdubEnabled().set(saved.launcherOverdub);
+         transport.tempo().value().setRaw(saved.tempo);
+         restoreArmState(saved.arms);
+         transport.setPosition(saved.position);
+         host.scheduleTask(function() {
+            transport.setPosition(saved.position);
+            restoreArmState(saved.arms);
+         }, 200);
+      }
+      request.cleanup = restoreState;
+
+      function fail(error) {
+         if (settled) return;
+         settled = true;
+         completed = true;
+         if (target.direct) {
+            try { target.write(saved.value); } catch (restoreError) { host.errorln("Control Deck could not restore the parameter: " + restoreError); }
+         }
+         restoreState();
+         finish(request, false, { message: String(error.message || error) });
+      }
+
+      function disarm() {
+         for (var i = 0; i < saved.arms.arms.length; i++) {
+            var spec = saved.arms.arms[i];
+            if (!spec.armed) continue;
+            var armedTrack = trackForArm(spec, saved.arms.scroll);
+            if (armedTrack) armedTrack.arm().set(false);
+         }
+      }
+
+      try {
+         transport.stop();
+         transport.isArrangerRecordEnabled().set(false);
+         transport.isArrangerLoopEnabled().set(false);
+         transport.isArrangerOverdubEnabled().set(false);
+         transport.isClipLauncherOverdubEnabled().set(false);
+         disarm();
+         transport.tempo().value().setRaw(tempo);
+         transport.automationWriteMode().set("latch");
+         transport.isArrangerAutomationWriteEnabled().set(true);
+         transport.setPosition(startBeats);
+         target.touch(true);
+         target.write(from);
+      } catch (error) {
+         fail(error);
+         return;
+      }
+
+      var preparationAttempts = 0;
+      function begin() {
+         if (completed || restored) return;
+         try {
+            if (Math.abs(transport.tempo().value().getRaw() - tempo) > 0.05 ||
+               Math.abs(transport.getPosition().get() - startBeats) > 0.05 ||
+               !transport.isArrangerAutomationWriteEnabled().get() ||
+               transport.isArrangerLoopEnabled().get()) {
+               if (preparationAttempts++ > 20) throw new Error("Bitwig did not get ready to record the automation ramp.");
+               transport.tempo().value().setRaw(tempo);
+               transport.isArrangerAutomationWriteEnabled().set(true);
+               transport.isArrangerLoopEnabled().set(false);
+               transport.setPosition(startBeats);
+               later(80, begin);
+               return;
+            }
+            transport.play();
+            later(40, monitor);
+         } catch (error) {
+            fail(error);
+         }
+      }
+
+      function monitor() {
+         if (completed || restored) return;
+         try {
+            var position = transport.getPosition().get();
+            if (position >= endBeats) {
+               target.write(to);
+               verifyThenFinish();
+               return;
+            }
+            target.write(automationRampValue(from, to, (position - startBeats) / span, curve));
+            if (!transport.isPlaying().get()) {
+               throw new Error("Bitwig's transport stopped at beat " + position + " before the automation reached beat " + endBeats + ".");
+            }
+            later(20, monitor);
+         } catch (error) {
+            fail(error);
+         }
+      }
+
+      function verifyThenFinish() {
+         if (completed || settled) return;
+         completed = true;
+         try { target.touch(false); } catch (error) { host.errorln("Control Deck could not release the automated parameter: " + error); }
+         try { target.restore(); } catch (error) { host.errorln("Control Deck could not return the parameter to its automation: " + error); }
+         transport.stop();
+         transport.isArrangerAutomationWriteEnabled().set(false);
+         transport.setPosition(startBeats);
+         later(200, function() {
+            if (request.done) return;
+            try {
+               var startActual = target.read();
+               var endAt = Math.max(startBeats, endBeats - 0.01);
+               transport.setPosition(endAt);
+               later(200, function() {
+                  if (request.done) return;
+                  try {
+                     var endActual = target.read();
+                     var startOk = !differs(startActual, from, 0.08);
+                     var endOk = !differs(endActual, to, 0.08);
+                        if (!startOk || !endOk) {
+                           if (settled) return;
+                           settled = true;
+                           if (target.direct) target.write(saved.value);
+                           restoreState();
+                        var why = target.direct
+                           ? " Controller API 18 cannot touch a direct parameter, so plug-in parameters such as filter cutoff record only when a Remote Control is aimed at them."
+                           : " The ramp is played into the arranger lane; Controller API 18 cannot write automation breakpoints.";
+                        finish(request, false, {
+                           message: "Bitwig did not confirm the automation ramp. At beat " + startBeats + " the value is " + startActual +
+                              " (requested " + from + "); near beat " + endBeats + " it is " + endActual + " (requested " + to + ")." + why,
+                           startValue: startActual,
+                           endValue: endActual,
+                           verified: false
+                        });
+                        return;
+                     }
+                     if (settled) return;
+                     settled = true;
+                     restoreState();
+                     later(220, function() {
+                        finish(request, true, {
+                           target: target.label,
+                           directParameter: target.direct,
+                           shape: shape,
+                           curve: curve,
+                           startBeats: startBeats,
+                           endBeats: endBeats,
+                           from: from,
+                           to: to,
+                           startValue: startActual,
+                           endValue: endActual,
+                           verified: true,
+                           tempoDuringPass: tempo,
+                           restoredTempo: transport.tempo().value().getRaw(),
+                           limit: "Recorded by playing the parameter in latch mode. Controller API 18 cannot insert automation breakpoints, and it cannot read the lane back except as the value at the playhead."
+                        });
+                     });
+                  } catch (error) {
+                     fail(error);
+                  }
+               });
+            } catch (error) {
+               fail(error);
+            }
+         });
+      }
+
+      later(300, begin);
+   });
+}
+
 function handleRenameClip(request) {
    var params = request.params;
    var newName = String(params.newName || "").trim();
@@ -2781,6 +3083,190 @@ function handleRenameClip(request) {
       });
    }
    later(40, walk);
+}
+
+function presetContentTypeIndex(names) {
+   var fuzzy = -1;
+   for (var i = 0; i < names.length; i++) {
+      var name = normalizeText(names[i]);
+      if (name === "presets" || name === "preset") return i;
+      if (fuzzy < 0 && name.indexOf("preset") !== -1) fuzzy = i;
+   }
+   return fuzzy;
+}
+
+var PRESET_LIMIT = "Bitwig's preset browser lists presets it has indexed for this device, including .bwpreset files and VST3 programs the plug-in exposes to the host. It cannot open a plug-in's own preset browser, so an instrument that only shows its init patch there stays on that patch until a Bitwig-indexed preset is loaded.";
+
+function handleFindPresets(request) {
+   var params = request.params;
+   selectDevice(request, params, function(device) {
+      var before = String(device.presetName().get() || "");
+      var deviceName = String(device.name().get() || "");
+      request.opensBrowser = true;
+      try { popupBrowser.shouldAudition().set(false); } catch (error) { /* audition toggle is best-effort */ }
+      device.replaceDeviceInsertionPoint().browse();
+      later(280, function() {
+         try {
+            if (!popupBrowser.exists().get()) throw new Error("Bitwig did not open its preset browser.");
+            try { popupBrowser.shouldAudition().set(false); } catch (error) { /* already attempted */ }
+            var types = arrayCopy(popupBrowser.contentTypeNames().get());
+            var index = presetContentTypeIndex(types);
+            if (index < 0) {
+               popupBrowser.cancel();
+               finish(request, false, {
+                  message: "Bitwig's browser for ‘" + deviceName + "’ has no Presets tab. Available: " + types.join(", ") + ". " + PRESET_LIMIT,
+                  contentTypes: types
+               });
+               return;
+            }
+            popupBrowser.selectedContentTypeIndex().set(index);
+            later(200, function() {
+               var limit = Number(params.limit || 50);
+               scanBrowserResults(request, String(params.query || ""), false, limit, function(matches, total) {
+                  popupBrowser.cancel();
+                  later(120, function() {
+                     var after = String(device.presetName().get() || "");
+                     if (after !== before) {
+                        try { application.undo(); } catch (error) { host.errorln("Control Deck could not undo a preset audition: " + error); }
+                        finish(request, false, { message: "Browsing changed the preset from ‘" + before + "’ to ‘" + after + "’. Undo was used. Nothing was loaded on purpose." });
+                        return;
+                     }
+                     finish(request, true, {
+                        device: deviceName,
+                        presetName: before,
+                        totalPresets: total,
+                        returned: Math.min(matches.length, limit),
+                        matches: matches.slice(0, limit),
+                        limit: PRESET_LIMIT
+                     });
+                  });
+               });
+            });
+         } catch (error) {
+            try { popupBrowser.cancel(); } catch (ignore) { /* browser may already be closed */ }
+            finish(request, false, { message: String(error.message || error) });
+         }
+      });
+   });
+}
+
+function confirmLoadedPreset(request, device, before) {
+   var deviceName = device.name().get();
+   var presetName = String(device.presetName().get() || "");
+   if (deviceName !== before.deviceName) {
+      try { application.undo(); } catch (error) { host.errorln("Control Deck could not undo a device replacement: " + error); }
+      finish(request, false, {
+         message: "Loading the preset replaced ‘" + before.deviceName + "’ with ‘" + deviceName + "’. Undo was used. " + PRESET_LIMIT
+      });
+      return;
+   }
+   if (!presetName || normalizeText(presetName) === normalizeText(before.presetName)) {
+      finish(request, false, {
+         message: "Bitwig did not confirm a new preset on ‘" + deviceName + "’. It is still ‘" + (presetName || "unnamed") + "’. " + PRESET_LIMIT,
+         presetName: presetName
+      });
+      return;
+   }
+   if (before.exactName && normalizeText(presetName) !== normalizeText(before.exactName)) {
+      try { application.undo(); } catch (error) { host.errorln("Control Deck could not undo an unexpected preset: " + error); }
+      finish(request, false, {
+         message: "Bitwig loaded ‘" + presetName + "’ instead of ‘" + before.exactName + "’. Undo was used.",
+         presetName: presetName
+      });
+      return;
+   }
+   finish(request, true, {
+      loaded: true,
+      source: before.source,
+      device: deviceName,
+      presetNameBefore: before.presetName,
+      presetNameAfter: presetName,
+      verifiedByPresetName: true,
+      deviceNameUnchanged: true,
+      limit: PRESET_LIMIT
+   });
+}
+
+function handleLoadPreset(request) {
+   var params = request.params;
+   var exactName = params.exactName ? String(params.exactName) : "";
+   var path = params.path ? String(params.path) : "";
+   if (!exactName && !path) throw new Error("Provide an exact preset name or an absolute .bwpreset or .vstpreset path.");
+   if (exactName && path) throw new Error("Load a preset by name or by path, not both.");
+   if (path && (path.charAt(0) !== "/" || !/\.(bwpreset|vstpreset)$/i.test(path))) {
+      throw new Error("Preset path must be an absolute .bwpreset or .vstpreset file. " + PRESET_LIMIT);
+   }
+   selectDevice(request, params, function(device) {
+      var before = {
+         deviceName: String(device.name().get() || ""),
+         presetName: String(device.presetName().get() || ""),
+         exactName: exactName,
+         source: path ? "file" : "browser"
+      };
+      if (path) {
+         device.replaceDeviceInsertionPoint().insertFile(path);
+         later(1000, function() {
+            try { confirmLoadedPreset(request, device, before); }
+            catch (error) { finish(request, false, { message: String(error.message || error) }); }
+         });
+         return;
+      }
+      request.opensBrowser = true;
+      try { popupBrowser.shouldAudition().set(false); } catch (error) { /* best-effort */ }
+      device.replaceDeviceInsertionPoint().browse();
+      later(280, function() {
+         try {
+            if (!popupBrowser.exists().get()) throw new Error("Bitwig did not open its preset browser.");
+            var types = arrayCopy(popupBrowser.contentTypeNames().get());
+            var index = presetContentTypeIndex(types);
+            if (index < 0) {
+               popupBrowser.cancel();
+               throw new Error("Bitwig's browser for ‘" + before.deviceName + "’ has no Presets tab. Available: " + types.join(", ") + ". " + PRESET_LIMIT);
+            }
+            popupBrowser.selectedContentTypeIndex().set(index);
+            later(200, function() {
+               scanBrowserResults(request, exactName, true, 20, function(matches) {
+                  if (matches.length === 0) {
+                     popupBrowser.cancel();
+                     finish(request, false, { message: "No preset named exactly ‘" + exactName + "’ was found in Bitwig's preset browser. " + PRESET_LIMIT });
+                     return;
+                  }
+                  if (matches.length !== 1) {
+                     popupBrowser.cancel();
+                     finish(request, false, { message: "Preset loading refused because ‘" + exactName + "’ has " + matches.length + " exact matches.", matches: matches });
+                     return;
+                  }
+                  var resultIndex = matches[0].resultIndex;
+                  var pageOffset = Math.floor(resultIndex / BROWSER_PAGE) * BROWSER_PAGE;
+                  var indexInPage = resultIndex - pageOffset;
+                  resultBank.scrollPosition().set(pageOffset);
+                  later(110, function() {
+                     try {
+                        var item = resultBank.getItemAt(indexInPage);
+                        if (!item.exists().get() || normalizeText(item.name().get()) !== normalizeText(exactName)) {
+                           throw new Error("The preset browser results changed before loading. Nothing was loaded; try again.");
+                        }
+                        item.isSelected().set(true);
+                        later(80, function() {
+                           popupBrowser.commit();
+                           later(700, function() {
+                              try { confirmLoadedPreset(request, device, before); }
+                              catch (error) { finish(request, false, { message: String(error.message || error) }); }
+                           });
+                        });
+                     } catch (error) {
+                        try { popupBrowser.cancel(); } catch (ignore) { /* already closing */ }
+                        finish(request, false, { message: String(error.message || error) });
+                     }
+                  });
+               });
+            });
+         } catch (error) {
+            try { if (popupBrowser.exists().get()) popupBrowser.cancel(); } catch (ignore) { /* already closing */ }
+            finish(request, false, { message: String(error.message || error) });
+         }
+      });
+   });
 }
 
 function dispatch(request) {
@@ -2894,6 +3380,15 @@ function dispatch(request) {
          return;
       case "rename_clip":
          handleRenameClip(request);
+         return;
+      case "write_automation":
+         handleWriteAutomation(request);
+         return;
+      case "find_presets":
+         handleFindPresets(request);
+         return;
+      case "load_preset":
+         handleLoadPreset(request);
          return;
       case "launch_scene":
          handleLaunchScene(request);
@@ -3345,6 +3840,8 @@ function init() {
    interested(transport.isArrangerLoopEnabled());
    interested(transport.isArrangerOverdubEnabled());
    interested(transport.isClipLauncherOverdubEnabled());
+   interested(transport.automationWriteMode());
+   interested(transport.isArrangerAutomationWriteEnabled());
    interested(transport.tempo().value());
    interested(transport.tempo().value().displayedValue());
    interested(transport.getPosition());
@@ -3401,6 +3898,7 @@ function init() {
    creatorBank = popupBrowser.creatorColumn().createItemBank(128);
 
    interested(popupBrowser.exists());
+   interested(popupBrowser.shouldAudition());
    interested(popupBrowser.contentTypeNames());
    interested(popupBrowser.selectedContentTypeIndex());
    interested(resultColumn.exists());
