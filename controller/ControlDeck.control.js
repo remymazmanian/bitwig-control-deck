@@ -316,6 +316,53 @@ function readTrackMeters(resetAfterRead) {
 // identified by index plus name. When two tracks share the name, a shifted
 // index could land on the wrong one and still pass, so such tracks are refused
 // unless the caller is renaming one of them.
+// Bank items are windows onto a scroll position, not stable tracks. Record-arm
+// is saved by index and name, then put back only on the track that still has
+// that name, so a bank scroll during a print cannot arm a neighbour.
+function captureArmState() {
+   var scroll = trackBank.scrollPosition().get();
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   var arms = [];
+   for (var i = 0; i < count; i++) {
+      var track = trackBank.getItemAt(i);
+      if (!track.exists().get()) continue;
+      arms.push({ index: i, name: track.name().get(), armed: Boolean(track.arm().get()) });
+   }
+   return { scroll: scroll, arms: arms };
+}
+
+function trackForArm(spec, scroll) {
+   if (trackBank.scrollPosition().get() !== scroll) trackBank.scrollPosition().set(scroll);
+   var indexed = trackBank.getItemAt(spec.index);
+   if (indexed && indexed.exists().get() && indexed.name().get() === spec.name) return indexed;
+   var count = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
+   for (var i = 0; i < count; i++) {
+      var candidate = trackBank.getItemAt(i);
+      if (candidate.exists().get() && candidate.name().get() === spec.name) return candidate;
+   }
+   return null;
+}
+
+function restoreArmState(saved) {
+   var missing = [];
+   for (var i = 0; i < saved.arms.length; i++) {
+      var spec = saved.arms[i];
+      var track = trackForArm(spec, saved.scroll);
+      if (!track) {
+         missing.push(spec.name);
+         continue;
+      }
+      if (Boolean(track.arm().get()) !== spec.armed) track.arm().set(spec.armed);
+   }
+   return missing;
+}
+
+function armedTrackCount(saved) {
+   var count = 0;
+   for (var i = 0; i < saved.arms.length; i++) if (saved.arms[i].armed) count++;
+   return count;
+}
+
 function requireTrack(params, allowDuplicateName) {
    var index = Number(params.trackIndex);
    if (index < 0 || index >= MAX_TRACKS || index >= trackBank.itemCount().get()) {
@@ -2160,19 +2207,15 @@ function handleRecordLauncherArrangement(request) {
    if (!(restoreTempo >= 20 && restoreTempo <= 666)) throw new Error("Restore tempo must be between 20 and 666 BPM.");
 
    // Everything the print changes is put back by restoreState, on success, on
-   // any error, and when the watchdog gives up on the request.
+   // any error, and when the watchdog gives up on the request. Arm is stored
+   // by name because bank slots follow the scroll position.
    var saved = {
       loopEnabled: transport.isArrangerLoopEnabled().get(),
       position: transport.getPosition().get(),
       arrangerOverdub: transport.isArrangerOverdubEnabled().get(),
       launcherOverdub: transport.isClipLauncherOverdubEnabled().get(),
-      armedTracks: []
+      arms: captureArmState()
    };
-   var trackCount = Math.min(trackBank.itemCount().get(), MAX_TRACKS);
-   for (var armIndex = 0; armIndex < trackCount; armIndex++) {
-      var candidate = trackBank.getItemAt(armIndex);
-      if (candidate.exists().get() && candidate.arm().get()) saved.armedTracks.push(candidate);
-   }
    var acceleratedTempo = 666;
    var nextEvent = 0;
    var startTimestamp = Date.now();
@@ -2191,12 +2234,17 @@ function handleRecordLauncherArrangement(request) {
       transport.isArrangerLoopEnabled().set(saved.loopEnabled);
       transport.isArrangerOverdubEnabled().set(saved.arrangerOverdub);
       transport.isClipLauncherOverdubEnabled().set(saved.launcherOverdub);
-      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(true);
+      restoreArmState(saved.arms);
       transport.tempo().value().setRaw(restoreTempo);
       transport.setPosition(saved.position);
       // Bitwig drops a playhead move made while the transport is still
-      // stopping, so move it again once the stop has landed.
-      host.scheduleTask(function() { transport.setPosition(saved.position); }, 200);
+      // stopping, so move it again once the stop has landed. Arm is applied
+      // again after the bank scroll has settled, so a slot that still showed
+      // the wrong track cannot keep the arm.
+      host.scheduleTask(function() {
+         transport.setPosition(saved.position);
+         restoreArmState(saved.arms);
+      }, 200);
    }
    request.cleanup = restoreState;
 
@@ -2222,7 +2270,7 @@ function handleRecordLauncherArrangement(request) {
             acceleratedTempo: acceleratedTempo,
             restoredTempo: transport.tempo().value().getRaw(),
             restoredPositionBeats: transport.getPosition().get(),
-            restoredArmedTracks: saved.armedTracks.length,
+            restoredArmedTracks: armedTrackCount(saved.arms),
             durationMs: Date.now() - startTimestamp,
             intervals: recordedIntervals,
             projectModified: project.isModified().get(),
@@ -2267,8 +2315,11 @@ function handleRecordLauncherArrangement(request) {
    }
 
    function stillArmed() {
-      for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) {
-         if (saved.armedTracks[armIndex].arm().get()) return true;
+      for (var armIndex = 0; armIndex < saved.arms.arms.length; armIndex++) {
+         var spec = saved.arms.arms[armIndex];
+         if (!spec.armed) continue;
+         var track = trackForArm(spec, saved.arms.scroll);
+         if (track && track.arm().get()) return true;
       }
       return false;
    }
@@ -2284,7 +2335,12 @@ function handleRecordLauncherArrangement(request) {
       transport.isArrangerLoopEnabled().set(false);
       transport.isArrangerOverdubEnabled().set(false);
       transport.isClipLauncherOverdubEnabled().set(false);
-      for (var unarmIndex = 0; unarmIndex < saved.armedTracks.length; unarmIndex++) saved.armedTracks[unarmIndex].arm().set(false);
+      for (var unarmIndex = 0; unarmIndex < saved.arms.arms.length; unarmIndex++) {
+         var armedSpec = saved.arms.arms[unarmIndex];
+         if (!armedSpec.armed) continue;
+         var armedTrack = trackForArm(armedSpec, saved.arms.scroll);
+         if (armedTrack) armedTrack.arm().set(false);
+      }
       for (var stopIndex = 0; stopIndex < orderedTrackPlans.length; stopIndex++) orderedTrackPlans[stopIndex].track.stop();
       transport.tempo().value().setRaw(acceleratedTempo);
       moveToStart();
@@ -2319,7 +2375,12 @@ function handleRecordLauncherArrangement(request) {
             return;
          }
          if (stillArmed()) {
-            for (var armIndex = 0; armIndex < saved.armedTracks.length; armIndex++) saved.armedTracks[armIndex].arm().set(false);
+            for (var armIndex = 0; armIndex < saved.arms.arms.length; armIndex++) {
+               var retrySpec = saved.arms.arms[armIndex];
+               if (!retrySpec.armed) continue;
+               var retryTrack = trackForArm(retrySpec, saved.arms.scroll);
+               if (retryTrack) retryTrack.arm().set(false);
+            }
             retryOr("Bitwig did not disarm the armed tracks for recording.");
             return;
          }

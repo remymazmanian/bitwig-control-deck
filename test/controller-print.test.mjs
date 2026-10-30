@@ -53,6 +53,7 @@ function fakeTrack(name, state, armed) {
         hasContent: () => value(() => true),
         launchWithOptions: (quantization, mode) => {
           state.log.push(name + ".launch(" + quantization + ")");
+          if (state.scrollOnLaunch) state.scroll = state.scrollOnLaunch;
           track.launches.push({ slotIndex, quantization, mode, armedTracks: state.tracks.filter(t => t.armed).length });
         }
       })
@@ -67,11 +68,32 @@ function setup(options = {}) {
   context.dispatch = loaded.originalDispatch;
   const state = {
     tempo: 120, position: 3, loop: true, arrangerOverdub: true, launcherOverdub: true, record: false,
-    refusePlay: Boolean(options.refusePlay), dropMoveAfterStop: Boolean(options.dropMoveAfterStop), log: [], jumps: 0
+    refusePlay: Boolean(options.refusePlay), dropMoveAfterStop: Boolean(options.dropMoveAfterStop),
+    scroll: 0, scrollOnLaunch: options.scrollOnLaunch || 0, log: [], jumps: 0
   };
   state.tracks = [fakeTrack("Bass", state, true), fakeTrack("Keys", state, false), fakeTrack("Vox", state, true)];
   context.transport = fakeTransport(context, state);
-  context.trackBank = { itemCount: () => value(() => state.tracks.length), getItemAt: index => state.tracks[index] };
+  // Bank slots follow the scroll position, the way Bitwig's track bank does.
+  context.trackBank = {
+    itemCount: () => value(() => state.tracks.length),
+    scrollPosition: () => value(() => state.scroll, next => { state.scroll = next; }),
+    getItemAt: index => {
+      const current = () => state.tracks[state.scroll + index];
+      return {
+        exists: () => value(() => Boolean(current())),
+        name: () => value(() => (current() ? current().name : "")),
+        arm: () => value(
+          () => Boolean(current() && current().armed),
+          next => {
+            const track = current();
+            if (!track) return;
+            state.log.push(track.name + ".arm=" + next);
+            track.armed = next;
+          }
+        )
+      };
+    }
+  };
   context.requireTrack = params => state.tracks[params.trackIndex];
   context.jumpToBeginningAction = { invoke: () => { state.jumps++; state.position = 0; } };
   context.project = { isModified: () => value(() => true) };
@@ -92,6 +114,15 @@ function expectRestored(state) {
   assert.equal(state.record, false);
   assert.deepEqual(state.tracks.map(t => t.armed), [true, false, true]);
 }
+
+test("the print puts record-arm back on the same tracks when the bank scrolls mid-print", () => {
+  const { context, responses, advance, state } = setup({ scrollOnLaunch: 2 });
+  context.enqueue(5000, "1", "arrange_launcher_clips", { regions: [region(1, 0, 8)] }, 120000);
+  advance(30000);
+  assert.equal(responses[0].ok, true, JSON.stringify(responses[0].payload));
+  assert.equal(state.scroll, 0);
+  expectRestored(state);
+});
 
 test("the print disarms tracks and turns off overdub while recording, then puts both back", () => {
   const { context, responses, advance, state } = setup();
