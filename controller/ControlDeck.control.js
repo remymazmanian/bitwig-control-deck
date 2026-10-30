@@ -3097,6 +3097,38 @@ function presetContentTypeIndex(names) {
 
 var PRESET_LIMIT = "Bitwig's preset browser lists presets it has indexed for this device, including .bwpreset files and VST3 programs the plug-in exposes to the host. It cannot open a plug-in's own preset browser, so an instrument that only shows its init patch there stays on that patch until a Bitwig-indexed preset is loaded.";
 
+function handlePlaceAudioFile(request) {
+   var params = request.params;
+   var mode = String(params.stretchMode || "raw");
+   if (mode !== "raw") {
+      throw new Error("Controller API 18 cannot set an audio clip's stretch mode. Control Deck did not place the file.");
+   }
+   var duration = Number(params.durationSeconds);
+   if (!(duration > 0)) throw new Error("Audio duration must be greater than zero. The file was not placed.");
+   var tempo = transport.tempo().value().getRaw();
+   var beats = duration * tempo / 60;
+   var sampleRate = params.sampleRate === undefined ? "unknown" : params.sampleRate;
+   var bitDepth = params.bitDepth === undefined ? "unknown" : params.bitDepth;
+   var roundedBeats = Math.round(beats * 1000) / 1000;
+   var roundedSeconds = Math.round(duration * 1000) / 1000;
+   finish(request, false, {
+      placed: false,
+      stretchMode: "raw",
+      stretchModeApplied: false,
+      apiVersion: 18,
+      durationSeconds: duration,
+      sampleRate: params.sampleRate,
+      bitDepth: params.bitDepth,
+      projectTempo: tempo,
+      startBeats: Number(params.startBeats),
+      rawLengthBeats: beats,
+      message: "Control Deck did not place the audio file. Controller API 18 cannot put a file on an Arranger clip at a beat, and Clip has no stretch, warp, or Raw playback control (still absent from the published API through version 25). " +
+         "insertFile uses the same path as a drag and drop, which lets Bitwig detect tempo and stretch the audio, so nothing was inserted and no track was created. " +
+         "At " + tempo + " BPM, Raw playback of this " + sampleRate + " Hz / " + bitDepth + "-bit file would be " +
+         roundedBeats + " beats (" + roundedSeconds + " seconds), starting at beat " + params.startBeats + "."
+   });
+}
+
 function handleFindPresets(request) {
    var params = request.params;
    selectDevice(request, params, function(device) {
@@ -3386,6 +3418,9 @@ function dispatch(request) {
          return;
       case "find_presets":
          handleFindPresets(request);
+         return;
+      case "place_audio_file":
+         handlePlaceAudioFile(request);
          return;
       case "load_preset":
          handleLoadPreset(request);

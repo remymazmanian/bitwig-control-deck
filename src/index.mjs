@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { BitwigClient } from "./bitwig-client.mjs";
+import { readAudioFileTiming } from "./audio-file.mjs";
 import { buildPluginIndex, readPluginIndex, searchPluginIndex } from "./plugin-index.mjs";
 
 const client = new BitwigClient();
@@ -347,6 +348,35 @@ server.registerTool("bitwig_insert_sample", {
     exactName: z.string().min(1)
   }
 }, async args => call("insert_sample", args, 25000));
+
+server.registerTool("bitwig_place_audio_file", {
+  description: "Ask to place a WAV, AIFF, or FLAC file on an audio track at an Arranger beat in Raw (no stretch) mode. Controller API 18 cannot do this without using drag-and-drop import, which can tempo-detect and stretch the file, and it cannot set Raw afterwards. The tool places nothing and reports how long Raw playback would be at the current tempo.",
+  inputSchema: {
+    path: z.string().min(1),
+    startBeats: z.number().nonnegative(),
+    stretchMode: z.enum(["raw"]).default("raw").describe("Only raw is accepted. It still cannot be applied, so the file is not placed"),
+    trackIndex: z.number().int().nonnegative().optional(),
+    trackName: z.string().min(1).optional(),
+    createTrackName: z.string().min(1).max(120).optional().describe("Ignored. No track is created, because the file cannot be placed safely")
+  }
+}, async args => {
+  let timing;
+  try {
+    timing = readAudioFileTiming(args.path);
+  } catch (error) {
+    return { content: [{ type: "text", text: error.message }], isError: true };
+  }
+  return call("place_audio_file", {
+    path: args.path,
+    startBeats: args.startBeats,
+    stretchMode: args.stretchMode,
+    durationSeconds: timing.durationSeconds,
+    sampleRate: timing.sampleRate,
+    bitDepth: timing.bitDepth,
+    channels: timing.channels,
+    format: timing.format
+  }, 10000);
+});
 
 server.registerTool("bitwig_insert_sample_file", {
   description: "Load an absolute WAV, AIFF, or FLAC file path into a new Bitwig Sampler device on an exact instrument track and verify the loaded sample name.",
